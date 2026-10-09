@@ -289,8 +289,8 @@ describe('service policy', () => {
     const ctx = new FakeContext(services([id]));
     const admin = new SessionAdmin(ctx, { ...BASE_CONFIG, dshHome: home });
     await admin.queue(id);
-    assert.equal(admin.unqueue(id), true);
-    assert.equal(admin.unqueue(id), false);
+    assert.equal(await admin.unqueue(id), true);
+    assert.equal(await admin.unqueue(id), false);
     assert.deepEqual(
       ctx.emitted.filter((entry) => entry.event === 'session/admin-unqueued').length,
       1,
@@ -776,7 +776,7 @@ describe('deferred deletions across a restart', () => {
     const live = new FakeContext(services([id]));
     const first = new SessionAdmin(live, { ...BASE_CONFIG, dshHome: home });
     await first.queue(id, { by: 'browser' });
-    assert.equal(first.unqueue(id), true);
+    assert.equal(await first.unqueue(id), true);
 
     const second = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
     assert.equal(await second.loadQueue(), 0, 'a cancelled deferral must not come back on restart');
