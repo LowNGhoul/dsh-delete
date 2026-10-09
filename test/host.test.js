@@ -784,3 +784,33 @@ describe('deferred deletions across a restart', () => {
     assert.equal(await readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8').then(() => true), true);
   });
 });
+
+describe('sidebar removal', () => {
+  it('announces the removal on the event the browser listens for', async () => {
+    const { home, id } = await makeStore();
+    const ctx = new FakeContext(services());
+    const admin = new SessionAdmin(ctx, { ...BASE_CONFIG, dshHome: home });
+    await admin.delete(id);
+    // The harness removes a sidebar row when it hears that a session went away,
+    // and it only says so for a session it disposed itself. A deletion here
+    // bypasses that lifecycle, so the removal has to be announced by name or the
+    // row survives until the next restart.
+    const removed = ctx.emitted.filter((entry) => entry.event === 'api-session/removed');
+    assert.equal(removed.length, 1, 'exactly one removal must be announced');
+    assert.equal(removed[0].payload, id, 'the payload must be the session id the client keys rows by');
+    // `api-session/removed` is forwarded with mode 'emit', so the argument has to
+    // be JSON-serializable on its own — a bare id is.
+    assert.equal(typeof removed[0].payload, 'string');
+  });
+
+  it('announces nothing when the deletion did not happen', async () => {
+    const { home } = await makeStore();
+    const live = new FakeContext(services(['session-host-cold-0001']));
+    const admin = new SessionAdmin(live, { ...BASE_CONFIG, dshHome: home });
+    await assert.rejects(() => admin.delete('session-host-cold-0001'));
+    assert.equal(live.emitted.filter((entry) => entry.event === 'api-session/removed').length, 0);
+
+    const other = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
+    await assert.rejects(() => other.delete('session-absent-0001'));
+  });
+});

@@ -247,6 +247,21 @@ describe('real Cordis runtime', { skip: cordis === undefined ? 'no dsh installat
     assert.equal(channelRoute, undefined);
   });
 
+  it('announces the removal on the real event bus, which is how the row leaves the sidebar', async () => {
+    const id = 'session-cordis-0006';
+    const { home, dir } = await makeStore(id);
+    const { root, admin } = await boot(home);
+    /** @type {unknown[]} */
+    const removals = [];
+    root.on('api-session/removed', (sessionId) => removals.push(sessionId));
+    await admin.delete(id);
+    // The client removes a sidebar row when this event arrives; it is on the
+    // forwarded-event allowlist with mode 'emit', so a bare session id is a valid
+    // payload for the browser.
+    assert.deepEqual(removals, [id]);
+    await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8'), /ENOENT/);
+  });
+
   it('inspects and deletes through real Services', async () => {
     const id = 'session-cordis-0002';
     const { home, dir } = await makeStore(id);
