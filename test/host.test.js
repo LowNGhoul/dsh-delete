@@ -217,7 +217,8 @@ describe('plugin shape', () => {
     const { home } = await makeStore();
     const ctx = new FakeContext({
       ...services(),
-      connection: { rpc: { handle: () => async () => {} } },
+      connection: { requestRejection: () => undefined },
+      webServer: { register: () => () => {} },
       commands: { register: () => () => {} },
     });
     apply(ctx, { ...BASE_CONFIG, dshHome: home });
@@ -373,128 +374,216 @@ describe('service policy', () => {
 
 describe('RPC channel', () => {
   /**
-   * Apply the plugin and capture the handler it registers on its channel.
+   * Serve the plugin's channel on a real HTTP server.
    *
-   * @param {{ home: string, live?: string[] }} options - store and liveness.
-   * @returns {{ call: (endpoint: string, payload: unknown) => Promise<any>, ctx: FakeContext }} the captured handler.
+   * The plugin registers an HTTP prefix route and asks the connection service
+   * for its trust decision, so the honest test is a real socket: it exercises
+   * the envelope encoding, the JSON body limit, the endpoint derivation and the
+   * rejection status codes, none of which a stubbed handler would cover.
+   *
+   * @param {{ home: string, live?: string[], trust?: (req: any) => number|undefined }} options - store, liveness, and an optional trust override.
+   * @returns {Promise<{ url: string, call: (path: string, body: unknown, headers?: Record<string,string>) => Promise<{ status: number, body: any }>, close: () => Promise<void> }>} the server and a caller.
    */
-  function rpcHarness({ home, live = [] }) {
-    /** @type {Function|undefined} */
-    let handler;
+  async function rpcServer({ home, live = [], trust }) {
+    const { createServer } = await import('node:http');
+    /** @type {any} */
+    let route;
+    const reject = trust ?? (() => undefined);
+    /** @type {any[]} */
+    const registrations = [];
     const ctx = new FakeContext({
       ...services(live),
-      connection: {
-        rpc: {
-          handle: (channel, fn) => {
-            assert.equal(channel, RPC_CHANNEL);
-            handler = fn;
-            return async () => {};
-          },
+      connection: { requestRejection: (req) => reject(req) },
+      webServer: {
+        register: (value) => {
+          registrations.push(value);
+          route = value;
+          return () => {};
         },
       },
     });
     apply(ctx, { ...BASE_CONFIG, dshHome: home });
+    assert.equal(registrations.length, 1, 'the plugin must register exactly one channel route');
+    assert.equal(registrations[0].kind, 'prefix');
+    assert.equal(registrations[0].path, RPC_CHANNEL);
+
+    const server = createServer((req, res) => {
+      route.handler(req, res).catch(() => {
+        res.writeHead(500);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = /** @type {any} */ (server.address()).port;
     return {
-      ctx,
+      url: `http://127.0.0.1:${port}`,
       /**
-       * Invoke the channel the way the real carrier does: the endpoint it hands
-       * the handler is the path with the channel prefix stripped, and a request
-       * whose envelope disagrees with that is refused before dispatch.
+       * Post one envelope the way the browser half does.
        *
-       * @param {string} path - an `endpoint` name, or an absolute path below the channel.
-       * @param {unknown} payload - decoded request body.
-       * @returns {Promise<any>} the handler's envelope.
+       * @param {string} path - request path.
+       * @param {unknown} body - request body.
+       * @param {Record<string,string>} [headers] - extra headers.
+       * @returns {Promise<{ status: number, body: any }>} the response.
        */
-      call: async (path, payload) => {
-        assert.ok(handler !== undefined, 'channel handler was not registered');
-        const endpoint = path.startsWith(`${RPC_CHANNEL}/`) ? path.slice(RPC_CHANNEL.length + 1) : path;
-        return handler(endpoint, payload, new AbortController().signal);
+      call: async (path, body, headers = {}) => {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...headers },
+          body: typeof body === 'string' ? body : JSON.stringify(body),
+        });
+        const text = await response.text();
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
+        return { status: response.status, body: parsed };
       },
+      close: () => new Promise((resolve) => server.close(() => resolve())),
     };
+  }
+
+  /**
+   * Build one request envelope.
+   *
+   * @param {string} method - endpoint name.
+   * @param {unknown} payload - request payload.
+   * @returns {Record<string, unknown>} the envelope.
+   */
+  function envelope(method, payload) {
+    return { type: 'client-request', rpcId: `test-${method}`, method, payload };
   }
 
   it('answers store, inspect and delete with the documented envelopes', async () => {
     const { home, id } = await makeStore();
-    const { call } = rpcHarness({ home });
+    const server = await rpcServer({ home });
+    try {
+      const store = await server.call('/session-admin/store', envelope('store', {}));
+      assert.equal(store.status, 200);
+      assert.equal(store.body.type, 'server-response');
+      assert.equal(store.body.rpcId, 'test-store');
+      assert.equal(store.body.result.ok, true);
+      assert.equal(store.body.result.value.dshHome, home);
 
-    const store = await call(RPC_STORE, {});
-    assert.equal(store.ok, true);
-    assert.equal(store.value.dshHome, home);
+      const inspection = await server.call('/session-admin/inspect', envelope('inspect', { sessionId: id }));
+      assert.equal(inspection.body.result.ok, true);
+      assert.equal(inspection.body.result.value.sessionId, id);
+      assert.equal(inspection.body.result.value.title, 'Host test session');
+      assert.equal(inspection.body.result.value.live, false);
+      assert.ok(inspection.body.result.value.lines.some((line) => /cannot be undone/i.test(line)));
+      // Paths are host facts; the browser projection must not carry them.
+      assert.equal(JSON.stringify(inspection.body.result.value).includes(home), false);
 
-    const inspection = await call(RPC_INSPECT, { sessionId: id });
-    assert.equal(inspection.ok, true);
-    assert.equal(inspection.value.sessionId, id);
-    assert.equal(inspection.value.title, 'Host test session');
-    assert.equal(inspection.value.live, false);
-    assert.ok(inspection.value.lines.some((line) => /cannot be undone/i.test(line)));
-    // Paths are host facts; the browser projection must not carry them.
-    assert.equal(Object.keys(inspection.value).includes('logFiles'), false);
-    assert.equal(JSON.stringify(inspection.value).includes(home), false);
+      const deleted = await server.call('/session-admin/delete', envelope('delete', { sessionId: id }));
+      assert.equal(deleted.body.result.ok, true);
+      assert.equal(deleted.body.result.value.queued, false);
+      assert.ok(deleted.body.result.value.report.removedCount > 0);
 
-    const deleted = await call(RPC_DELETE, { sessionId: id });
-    assert.equal(deleted.ok, true);
-    assert.equal(deleted.value.queued, false);
-    assert.equal(deleted.value.report.sessionId, id);
-    assert.ok(deleted.value.report.removedCount > 0);
-    assert.ok(Array.isArray(deleted.value.lines));
-
-    const again = await call(RPC_DELETE, { sessionId: id });
-    assert.equal(again.ok, false);
-    assert.equal(again.error.code, 'SESSION_ADMIN_NOT_FOUND');
+      const again = await server.call('/session-admin/delete', envelope('delete', { sessionId: id }));
+      assert.equal(again.body.result.ok, false);
+      assert.equal(again.body.result.error.code, 'SESSION_ADMIN_NOT_FOUND');
+    } finally {
+      await server.close();
+    }
   });
 
-  it('rejects an unknown endpoint', async () => {
+  it('refuses an unauthenticated request before reading a body', async () => {
     const { home } = await makeStore();
-    const { call } = rpcHarness({ home });
-    const result = await call('/session-admin/nope', {});
-    assert.equal(result.ok, false);
-    assert.equal(result.error.code, 'SESSION_ADMIN_INVALID_OPTION');
+    // The default override in this harness is "trusted"; this one rejects with 401.
+    const server = await rpcServer({ home, trust: () => 401 });
+    try {
+      const response = await server.call('/session-admin/store', envelope('store', {}));
+      assert.equal(response.status, 401);
+      assert.equal(response.body, 'unauthorized');
+      const forbidden = await rpcServer({ home, trust: () => 403 });
+      const denied = await forbidden.call('/session-admin/store', envelope('store', {}));
+      assert.equal(denied.status, 403);
+      assert.equal(denied.body, 'forbidden');
+      await forbidden.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('rejects a malformed envelope, an unknown endpoint and a bad path', async () => {
+    const { home } = await makeStore();
+    const server = await rpcServer({ home });
+    try {
+      const malformed = await server.call('/session-admin/store', { type: 'client-request', rpcId: 'x', method: 'other', payload: {} });
+      assert.equal(malformed.status, 200);
+      assert.equal(malformed.body.result.ok, false);
+      assert.equal(malformed.body.result.error.code, 'SESSION_ADMIN_INVALID_OPTION');
+
+      const unknown = await server.call('/session-admin/nope', envelope('nope', {}));
+      assert.equal(unknown.status, 200);
+      assert.equal(unknown.body.result.ok, false);
+      assert.equal(unknown.body.result.error.code, 'SESSION_ADMIN_INVALID_OPTION');
+
+      // A nested path names no endpoint.
+      const nested = await server.call('/session-admin/a/b', envelope('a', {}));
+      assert.equal(nested.status, 404);
+
+      const notJson = await server.call('/session-admin/store', 'not json at all');
+      assert.equal(notJson.status, 400);
+    } finally {
+      await server.close();
+    }
   });
 
   it('rejects hostile payloads without touching the filesystem', async () => {
     const { home, dir } = await makeStore();
-    const { call } = rpcHarness({ home });
-    for (const payload of [
-      { sessionId: '../etc/passwd' },
-      { sessionId: 'a/b' },
-      { sessionId: '' },
-      { sessionId: 42 },
-      { sessionId: 'x'.repeat(200) },
-      { sessionId: '..' },
-      { sessionId: null },
-      {},
-      null,
-      'session-plain-string',
-    ]) {
-      const result = await call(RPC_DELETE, payload);
-      assert.equal(result.ok, false, `expected ${JSON.stringify(payload)} to be rejected`);
-      assert.equal(result.error.code, 'SESSION_ADMIN_INVALID_OPTION');
+    const server = await rpcServer({ home });
+    try {
+      for (const payload of [
+        { sessionId: '../etc/passwd' },
+        { sessionId: 'a/b' },
+        { sessionId: '' },
+        { sessionId: 42 },
+        { sessionId: 'x'.repeat(200) },
+        { sessionId: '..' },
+        { sessionId: null },
+        {},
+        null,
+        'session-plain-string',
+      ]) {
+        const response = await server.call('/session-admin/delete', envelope('delete', payload));
+        assert.equal(response.body.result.ok, false, `expected ${JSON.stringify(payload)} to be rejected`);
+        assert.equal(response.body.result.error.code, 'SESSION_ADMIN_INVALID_OPTION');
+      }
+      const stillThere = await readFile(path.join(dir, 'session.v3.jsonl.zstd'));
+      assert.ok(stillThere.length > 0);
+    } finally {
+      await server.close();
     }
-    const stillThere = await readFile(path.join(dir, 'session.v3.jsonl.zstd'));
-    assert.ok(stillThere.length > 0);
   });
 
   it('reports a live session as live and queues only when asked', async () => {
     const { home, id } = await makeStore();
-    const { call } = rpcHarness({ home, live: [id] });
+    const server = await rpcServer({ home, live: [id] });
+    try {
+      const inspection = await server.call('/session-admin/inspect', envelope('inspect', { sessionId: id }));
+      assert.equal(inspection.body.result.value.live, true);
 
-    const inspection = await call(RPC_INSPECT, { sessionId: id });
-    assert.equal(inspection.ok, true);
-    assert.equal(inspection.value.live, true);
+      const refused = await server.call('/session-admin/delete', envelope('delete', { sessionId: id }));
+      assert.equal(refused.body.result.ok, false);
+      assert.equal(refused.body.result.error.code, 'SESSION_ADMIN_LIVE_SESSION');
 
-    const refused = await call(RPC_DELETE, { sessionId: id });
-    assert.equal(refused.ok, false);
-    assert.equal(refused.error.code, 'SESSION_ADMIN_LIVE_SESSION');
+      const queued = await server.call('/session-admin/delete', envelope('delete', { sessionId: id, queue: true }));
+      assert.equal(queued.body.result.ok, true);
+      assert.equal(queued.body.result.value.queued, true);
 
-    const queued = await call(RPC_DELETE, { sessionId: id, queue: true });
-    assert.equal(queued.ok, true);
-    assert.equal(queued.value.queued, true);
+      const pending = await server.call('/session-admin/pending', envelope('pending', {}));
+      assert.equal(pending.body.result.ok, true);
+      assert.equal(pending.body.result.value.queued.length, 1);
+      assert.deepEqual(pending.body.result.value.unfinished, []);
 
-    const pending = await call(RPC_PENDING, {});
-    assert.equal(pending.ok, true);
-    assert.equal(pending.value.queued.length, 1);
-    assert.equal(pending.value.queued[0].sessionId, id);
-    assert.deepEqual(pending.value.unfinished, []);
+      const repaired = await server.call('/session-admin/repair', envelope('repair', {}));
+      assert.equal(repaired.body.result.ok, true);
+      assert.deepEqual(repaired.body.result.value.repaired, []);
+    } finally {
+      await server.close();
+    }
   });
 });
 
@@ -510,7 +599,8 @@ describe('command surface', () => {
     const registrations = [];
     const ctx = new FakeContext({
       ...services(live),
-      connection: { rpc: { handle: () => async () => {} } },
+      connection: { requestRejection: () => undefined },
+      webServer: { register: () => () => {} },
       commands: { register: (value) => { registrations.push(value); return () => {}; } },
     });
     apply(ctx, { ...BASE_CONFIG, dshHome: home, ...config });
@@ -591,7 +681,8 @@ describe('command surface', () => {
     let handled = 0;
     const ctx = new FakeContext({
       ...services(),
-      connection: { rpc: { handle: () => { handled += 1; return async () => {}; } } },
+      connection: { requestRejection: () => undefined },
+      webServer: { register: () => { handled += 1; return () => {}; } },
     });
     apply(ctx, { ...BASE_CONFIG, dshHome: home, enableRpc: false });
     assert.equal(handled, 0);

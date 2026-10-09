@@ -23,10 +23,18 @@ control:
   directories are recognized by containment rather than by name, a found log is
   required, and the engine re-checks every path and raises
   `SESSION_ADMIN_DELETION_INCOMPLETE` if anything survived.
-- **The browser delete action could never have worked.** The RPC endpoints were
-  absolute while the carrier hands the handler a name relative to the channel, so
-  every request would have been refused before dispatch. Endpoints are relative
-  now, and the test harness strips the prefix exactly as the real carrier does.
+- **The browser delete action could never have worked.** Two independent defects:
+  the RPC endpoints were absolute while the carrier hands the handler a name
+  relative to the channel, and the channel was registered with
+  `connection.rpc.handle()`, which cannot be called from outside the connection
+  package — it resolves `webServer` from the connection service's own context,
+  which does not declare that injection, so it throws and the channel never
+  reaches the route table. Requests then fell through to the SPA's static handler
+  as a 405. Endpoints are relative names and the route is registered directly on
+  `webServer` behind `connection.requestRejection`, which is the shape the shipped
+  `open-in-app` routes use. Both defects were caught by booting a real profile and
+  calling the endpoint over HTTP, so the RPC tests now run against a real
+  `node:http` server instead of a stubbed handler.
 - **A cancelled deletion destroyed its own recovery record.** The journal was
   removed on any exit; it now survives unless the deletion completed.
 - **A configuration that declared roots was honored by listings and ignored by

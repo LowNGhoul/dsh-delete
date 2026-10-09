@@ -96,7 +96,8 @@ describe('real Cordis runtime', { skip: cordis === undefined ? 'no dsh installat
   async function boot(home, liveIds = []) {
     const { Context, Service } = cordis;
     const root = new Context();
-    let channel = null;
+    /** @type {any} */
+    let channelRoute;
     /** @type {any[]} */
     const commands = [];
     const live = new Set(liveIds);
@@ -147,15 +148,18 @@ describe('real Cordis runtime', { skip: cordis === undefined ? 'no dsh installat
     await root.plugin(Persistence);
     await root.plugin(StorageDomain);
     await root.plugin(Commands);
+    // The two host services the plugin's browser channel needs: the trust
+    // decision, and the route registry it publishes its prefix into.
     await root.plugin({
       name: 'connection-stand-in',
       apply(ctx) {
-        ctx.provide('connection', {
-          rpc: {
-            handle(name) {
-              channel = name;
-              return async () => {};
-            },
+        ctx.provide('connection', { requestRejection: () => undefined });
+        ctx.provide('webServer', {
+          register(route) {
+            channelRoute = route;
+            return () => {
+              channelRoute = undefined;
+            };
           },
         });
       },
@@ -166,15 +170,81 @@ describe('real Cordis runtime', { skip: cordis === undefined ? 'no dsh installat
     const plugin = (await import('../lib/index.js')).default;
     await root.plugin(plugin, { ...DEFAULTS, dshHome: home });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    return { root, channel, commands, admin: root.get('sessionAdmin') };
+    return { root, channelRoute, commands, admin: root.get('sessionAdmin') };
   }
 
   it('registers its service, channel and command in a real fiber tree', async () => {
     const { home } = await makeStore('session-cordis-0001');
-    const { admin, channel, commands } = await boot(home);
+    const { admin, channelRoute, commands } = await boot(home);
     assert.ok(admin !== undefined, 'ctx.sessionAdmin must resolve');
-    assert.equal(channel, '/session-admin');
+    assert.equal(channelRoute?.kind, 'prefix');
+    assert.equal(channelRoute?.path, '/session-admin');
     assert.deepEqual(commands.map((entry) => entry.name), ['delete']);
+  });
+
+  it('withdraws the channel route when its fiber is disposed', async () => {
+    const { home } = await makeStore('session-cordis-0005');
+    // Boot the plugin's fiber directly so it can be disposed in isolation.
+    const { Context, Service } = cordis;
+    const root = new Context();
+    /** @type {any} */
+    let channelRoute;
+    class Sessions extends Service {
+      constructor(ctx) {
+        super(ctx, 'sessions');
+      }
+
+      get() {
+        return undefined;
+      }
+
+      list() {
+        return [];
+      }
+    }
+    class Persistence extends Service {
+      constructor(ctx) {
+        super(ctx, 'sessionPersistence');
+      }
+
+      async list() {
+        return [];
+      }
+    }
+    class StorageDomain extends Service {
+      constructor(ctx) {
+        super(ctx, 'storageDomain');
+      }
+
+      get() {
+        return undefined;
+      }
+    }
+    await root.plugin(Sessions);
+    await root.plugin(Persistence);
+    await root.plugin(StorageDomain);
+    await root.plugin({
+      name: 'stand-ins',
+      apply(ctx) {
+        ctx.provide('connection', { requestRejection: () => undefined });
+        ctx.provide('webServer', {
+          register(route) {
+            channelRoute = route;
+            return () => {
+              channelRoute = undefined;
+            };
+          },
+        });
+      },
+    });
+
+    const plugin = (await import('../lib/index.js')).default;
+    const fiber = await root.plugin(plugin, { ...DEFAULTS, dshHome: home });
+    assert.ok(channelRoute !== undefined, 'the route must be registered while the fiber lives');
+    // A reloaded profile must not accumulate dead channels, so disposal has to
+    // run the route's own disposer.
+    await fiber.dispose();
+    assert.equal(channelRoute, undefined);
   });
 
   it('inspects and deletes through real Services', async () => {

@@ -18,6 +18,10 @@ short list of things only you can confirm on your machine.
 | The host entry imports cleanly | `node -e "import('./lib/index.js')"` | exports the plugin |
 | The composition patch parses as YAML | `node -e "require('js-yaml').load(...)"` | one insert row, expected config |
 | The browser bundle evaluates as a classic script | `node --test test/client.test.js` | factory registers, plugin applies, dialog renders |
+| The RPC channel is reachable over real HTTP | `node --test test/host.test.js` | `node:http` server, 200 with the documented envelope, 401 unauthenticated, 404 for a nested path |
+| A real profile boots with the row composed | `dsh --profile web --dump-config \| grep -A6 dsh-session-admin` | the row and its config appear |
+| The endpoint answers on a real server | boot a second instance, then `curl` the channel | `POST /session-admin/store` returns the store summary; without the cookie it is `401` |
+| The client bundle is served | fetch the application combo URL from the index | our `window.__ModuleLoader__.load({ id: 'dsh-session-admin' … })` is inside it |
 
 The full-deletion check against a real store copy:
 

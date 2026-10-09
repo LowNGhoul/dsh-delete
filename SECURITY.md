@@ -110,20 +110,38 @@ session closes) instead of pretending the deletion happened.
 **Threat.** Any web page in the user's browser, or any device on the LAN,
 triggers deletions through the plugin's HTTP endpoint.
 
-**Control.** The plugin registers its own channel (`/session-admin`) on
-`dsh-client-connection`'s shared, already-authenticated API carrier rather than
-inventing an endpoint. That carrier applies, before the handler runs:
+**Control.** The plugin serves exactly one route, `POST /session-admin/<endpoint>`,
+and it is not reachable without the harness's own browser authentication. Before
+the request body is read, the handler asks `ctx.connection.requestRejection(req)`
+and answers `403` or `401` itself, so the same two checks that guard every other
+host capability apply here:
 
-- a Host/Origin fence (`403`) that refuses a request whose `Host` is not
-  loopback or a configured trusted authority, refuses a mismatched `Origin`,
-  and refuses `sec-fetch-site: cross-site`;
-- browser-session authentication (`401`) requiring the signed, `HttpOnly`,
+- the Host/Origin fence, which refuses a request whose `Host` is not loopback or
+  a configured trusted authority, refuses a mismatched `Origin`, and refuses
+  `sec-fetch-site: cross-site`;
+- browser-session authentication, requiring the signed, `HttpOnly`,
   `SameSite=Strict` cookie that only a token-bearing visit to `/` can obtain.
+
+The route is registered directly on `webServer` rather than through
+`connection.rpc.handle()`. That helper is unusable from outside the connection
+package: it registers its route as `owner.effect(() => owner.webServer.register(…))`
+where `owner` is the connection service's *own* context, which does not declare
+the `webServer` injection, so the call throws and the channel never reaches the
+route table. This is the same shape the shipped `open-in-app` routes use, and the
+authorization decision is still the connection service's, not this plugin's.
 
 The plugin adds no bypass, no query-token path, and no unauthenticated route. It
 also refuses to register on `/api`, which is reserved for the host's single
-interceptor — a second owner there throws, so this is structurally impossible
-rather than merely avoided.
+interceptor, so a collision there is structurally impossible rather than merely
+avoided. The body is size-capped at 1 MiB and parsed into an owned plain value
+before any field is read.
+
+**Covered by.** `test/host.test.js` → *refuses an unauthenticated request before
+reading a body*, *rejects a malformed envelope, an unknown endpoint and a bad
+path*, *rejects hostile payloads without touching the filesystem*. These run
+against a real `node:http` server, so the envelope encoding, the endpoint
+derivation and the rejection status codes are all exercised for real rather than
+through a stub.
 
 ### 3.5 Information disclosure to the page
 
