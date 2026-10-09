@@ -19,6 +19,15 @@ already loads.
 ## Install
 
 ```sh
+git clone https://github.com/LowNGhoul/dsh-delete.git
+dsh plugin --profile web add "$PWD/dsh-delete"
+```
+
+The repository is `dsh-delete`; the package inside it is `dsh-session-admin`, and
+that is the name a profile lists. Installing from a checkout you already have
+works the same way:
+
+```sh
 dsh plugin --profile web add /absolute/path/to/dsh-session-admin
 ```
 

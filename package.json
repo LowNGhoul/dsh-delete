@@ -39,6 +39,7 @@
   },
   "license": "MIT",
   "keywords": [
+    "dsh-delete",
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
@@ -48,5 +49,14 @@
     "delete",
     "purge",
     "privacy"
-  ]
+  ],
+  "author": "LowNGhoul",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LowNGhoul/dsh-delete.git"
+  },
+  "homepage": "https://github.com/LowNGhoul/dsh-delete#readme",
+  "bugs": {
+    "url": "https://github.com/LowNGhoul/dsh-delete/issues"
+  }
 }

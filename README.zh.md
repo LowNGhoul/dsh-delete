@@ -15,6 +15,14 @@ Node 22.19 及以上（引擎用到内置的 Zstandard API 和 `node --test`）�
 ## 安装
 
 ```sh
+git clone https://github.com/LowNGhoul/dsh-delete.git
+dsh plugin --profile web add "$PWD/dsh-delete"
+```
+
+仓库名是 `dsh-delete`，里面的包名是 `dsh-session-admin`——profile 里列出的是包名。
+已经在本地有检出的话，直接装那个目录也一样：
+
+```sh
 dsh plugin --profile web add /绝对路径/dsh-session-admin
 ```
 
