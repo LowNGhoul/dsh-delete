@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -21,8 +22,10 @@ import {
   isSessionId,
   listPendingDeletions,
   projectKey,
+  readDeletedIds,
   readProjectionTitle,
   readSessionHeader,
+  repairWorkspace,
   resolveLayout,
   summarizeStore,
 } from '../lib/engine.js';
@@ -372,9 +375,18 @@ describe('deletion', () => {
   it('writes a ledger row and leaves no journal behind', async () => {
     const created = await fixture.addSession({ id: 'session-ledger-0001', title: 'Ledger' });
     await deleteSession({ id: created.id, dshHome: fixture.home, live: false });
-    const ledger = await readFile(path.join(fixture.home, 'session-admin', 'deletions.jsonl'), 'utf8');
+    const ledgerFile = path.join(fixture.home, 'session-admin', 'deletions.jsonl');
+    const ledger = await readFile(ledgerFile, 'utf8');
     const rows = ledger.trim().split('\n').map((line) => JSON.parse(line));
-    assert.ok(rows.some((row) => row.sessionId === 'session-ledger-0001' && row.title === 'Ledger'));
+    const row = rows.find((entry) => entry.sessionId === 'session-ledger-0001');
+    assert.ok(row !== undefined, 'the ledger must record the deletion');
+    // The title is conversation content, and the ledger is not a place for it.
+    assert.equal(Object.hasOwn(row, 'title'), false);
+    assert.equal(ledger.includes('Ledger'), false);
+    // The ledger and its directory are private, like every other store file.
+    const { stat: statFile } = await import('node:fs/promises');
+    assert.equal((await statFile(ledgerFile)).mode & 0o777, 0o600);
+    assert.equal((await statFile(path.join(fixture.home, 'session-admin'))).mode & 0o777, 0o700);
     assert.deepEqual(await listPendingDeletions({ dshHome: fixture.home }), []);
   });
 });
@@ -545,5 +557,259 @@ describe('resume race', () => {
     assert.equal(await readFile(path.join(layout.projectionsDir, 'session-race-0001.json'), 'utf8').then(() => true), true);
     const surviving = await inspectSession({ id: 'session-race-0001', dshHome: home, live: false });
     assert.equal(surviving.title, 'Race');
+  });
+});
+
+describe('log-name coverage (false-positive deletion)', () => {
+  /**
+   * Write one session directory by hand, with an exact log file name.
+   *
+   * @param {{ id: string, logName: string, projectDir?: string, idInLog?: string }} spec - what to write.
+   * @returns {Promise<{ home: string, dir: string, log: string }>} the created paths.
+   */
+  async function handmade(spec) {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-name-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const projectDir = path.join(layout.sessionsRoot, spec.projectDir ?? projectKey('/tmp/name'));
+    const dir = path.join(projectDir, encodeSegment(spec.id));
+    await mkdir(dir, { recursive: true });
+    const log = path.join(dir, spec.logName);
+    await writeFile(
+      log,
+      `${JSON.stringify({ type: 'session', version: 3, id: spec.idInLog ?? spec.id, cwd: '/tmp/name' })}\n`,
+    );
+    await writeFile(
+      path.join(layout.projectionsDir, `${spec.id}.json`),
+      `${JSON.stringify({ version: 7, record: { identity: {}, rows: { title: { ver: 1, seq: 1, val: 'Named' } } } })}\n`,
+    );
+    return { home, dir, log };
+  }
+
+  it('deletes a generation-zero log named session.jsonl', async () => {
+    const made = await handmade({ id: 'session-v0-0001', logName: 'session.jsonl' });
+    const report = await deleteSession({ id: 'session-v0-0001', dshHome: made.home, live: false });
+    assert.deepEqual(report.logFiles, [made.log]);
+    await assert.rejects(() => readFile(made.log), /ENOENT/);
+    assert.deepEqual(await listPendingDeletions({ dshHome: made.home }), []);
+  });
+
+  it('deletes a compressed generation-zero log', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-v0z-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const dir = path.join(layout.sessionsRoot, projectKey('/tmp/v0z'), encodeSegment('session-v0z-0001'));
+    await mkdir(dir, { recursive: true });
+    const log = path.join(dir, 'session.jsonl.zstd');
+    await writeFile(log, zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', version: 0, id: 'session-v0z-0001', cwd: '/tmp/v0z' })}\n`)));
+    const report = await deleteSession({ id: 'session-v0z-0001', dshHome: home, live: false });
+    assert.equal(report.logFiles.length, 1);
+    await assert.rejects(() => readFile(log), /ENOENT/);
+  });
+
+  it('finds a session in a project directory that is not named --<project>--', async () => {
+    const made = await handmade({ id: 'session-renamed-0001', logName: 'session.v3.jsonl', projectDir: 'my-own-folder' });
+    const inspection = await inspectSession({ id: 'session-renamed-0001', dshHome: made.home, live: false });
+    assert.equal(inspection.logFiles.length, 1);
+    await deleteSession({ id: 'session-renamed-0001', dshHome: made.home, live: false });
+    await assert.rejects(() => readFile(made.log), /ENOENT/);
+  });
+
+  it('refuses a log that declares a different session', async () => {
+    const made = await handmade({ id: 'session-mismatch-0001', logName: 'session.v3.jsonl', idInLog: 'session-other-9999' });
+    await assert.rejects(
+      () => deleteSession({ id: 'session-mismatch-0001', dshHome: made.home, live: false }),
+      (error) => error.code === 'SESSION_ADMIN_IDENTITY_MISMATCH',
+    );
+    assert.equal(await readFile(made.log, 'utf8').then(() => true), true);
+  });
+
+  it('names orphan metadata instead of reporting a deletion', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-orphan-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    await writeFile(
+      path.join(layout.projectionsDir, 'session-orphan-0001.json'),
+      `${JSON.stringify({ version: 7, record: { identity: {}, rows: { title: { ver: 1, seq: 1, val: 'Orphan' } } } })}\n`,
+    );
+    await assert.rejects(
+      () => deleteSession({ id: 'session-orphan-0001', dshHome: home, live: false }),
+      (error) => error.code === 'SESSION_ADMIN_ORPHAN_METADATA',
+    );
+    assert.equal(await readFile(path.join(layout.projectionsDir, 'session-orphan-0001.json'), 'utf8').then(() => true), true);
+  });
+});
+
+describe('symlinked ancestors (containment)', () => {
+  it('does not follow a symlinked sessions root', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkroot-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outside-'));
+    await mkdir(path.join(home, 'storages', 'session_projcache', 'sessions'), { recursive: true });
+    // The whole sessions root is a link to somewhere else.
+    const victimDir = path.join(outside, projectKey('/tmp/victim'), encodeSegment('session-linked-root-0001'));
+    await mkdir(victimDir, { recursive: true });
+    await writeFile(path.join(victimDir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-linked-root-0001","cwd":"/tmp/victim"}\n');
+    await writeFile(path.join(victimDir, 'IMPORTANT.txt'), 'do not delete me\n');
+    await symlink(outside, path.join(home, 'sessions'), 'dir');
+
+    // The store root itself is refused, so nothing under the link is even
+    // planned for deletion.
+    await assert.rejects(
+      () => deleteSession({ id: 'session-linked-root-0001', dshHome: home, live: false }),
+      StorageShapeError,
+    );
+    assert.equal(await readFile(path.join(victimDir, 'IMPORTANT.txt'), 'utf8'), 'do not delete me\n');
+    assert.equal(await readFile(path.join(victimDir, 'session.v3.jsonl'), 'utf8').then(() => true), true);
+  });
+
+  it('does not follow a symlinked project directory', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkproj-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outproj-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    await mkdir(layout.sessionsRoot, { recursive: true });
+    const victimDir = path.join(outside, encodeSegment('session-linked-project-0001'));
+    await mkdir(victimDir, { recursive: true });
+    await writeFile(path.join(victimDir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-linked-project-0001","cwd":"/tmp/p"}\n');
+    await writeFile(path.join(victimDir, 'IMPORTANT.txt'), 'keep\n');
+    await symlink(outside, path.join(layout.sessionsRoot, projectKey('/tmp/p')), 'dir');
+
+    await assert.rejects(
+      () => deleteSession({ id: 'session-linked-project-0001', dshHome: home, live: false }),
+      SessionNotFoundError,
+    );
+    assert.equal(await readFile(path.join(victimDir, 'IMPORTANT.txt'), 'utf8'), 'keep\n');
+  });
+
+  it('does not unlink a projection record through a symlinked storages root', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkstore-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outstore-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.sessionsRoot, { recursive: true });
+    await mkdir(path.join(outside, 'session_projcache', 'sessions'), { recursive: true });
+    const victimRecord = path.join(outside, 'session_projcache', 'sessions', 'session-linked-store-0001.json');
+    await writeFile(victimRecord, '{"version":7,"record":{"identity":{},"rows":{}}}\n');
+    await symlink(outside, path.join(home, 'storages'), 'dir');
+
+    const report = await inspectSession({ id: 'session-linked-store-0001', dshHome: home, live: false }).catch((error) => error);
+    // The record is unreachable through a link (it is not store content), so
+    // either it is not found at all or it is reported without being touched.
+    assert.ok(report instanceof Error || report.projectionFiles.length === 0);
+    assert.equal(await readFile(victimRecord, 'utf8').then(() => true), true);
+  });
+
+  it('refuses to rewrite a workspace unit that is a symlink', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkws-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outws-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const dir = path.join(layout.sessionsRoot, projectKey('/tmp/ws'), encodeSegment('session-linked-ws-0001'));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-linked-ws-0001","cwd":"/tmp/ws"}\n');
+    const realUnit = path.join(outside, 'workspace.json');
+    await writeFile(realUnit, `${JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { archivedSessionIds: ['session-linked-ws-0001'] },
+      tables: { workspaces: { 'ws-1': { path: '/tmp/ws', title: 'ws', sessionIds: ['session-linked-ws-0001'], createdAt: 'x', updatedAt: 'y' } } },
+    })}\n`);
+    await symlink(realUnit, layout.workspaceFile, 'file');
+
+    await assert.rejects(
+      () => deleteSession({ id: 'session-linked-ws-0001', dshHome: home, live: false }),
+      (error) => error.code === 'SESSION_ADMIN_STORAGE_SHAPE',
+    );
+    const after = JSON.parse(await readFile(realUnit, 'utf8'));
+    assert.deepEqual(after.global.archivedSessionIds, ['session-linked-ws-0001']);
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl'), 'utf8').then(() => true), true);
+  });
+});
+
+describe('workspace bookkeeping repair', () => {
+  it('re-applies a deletion the live registry restored from memory', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-repair-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const projectDir = path.join(layout.sessionsRoot, projectKey('/tmp/repair'));
+    const dir = path.join(projectDir, encodeSegment('session-repair-0001'));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-repair-0001","cwd":"/tmp/repair"}\n');
+    await mkdir(path.dirname(layout.ledgerFile), { recursive: true });
+    await writeFile(layout.ledgerFile, `${JSON.stringify({ at: 'x', sessionId: 'session-repair-0001' })}\n`);
+    // The registry's in-memory copy wins a round and restores the id.
+    await writeFile(layout.workspaceFile, `${JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['ws-1'], archivedSessionIds: ['session-repair-0001'] },
+      tables: {
+        workspaces: {
+          'ws-1': { path: '/tmp/repair', title: 'repair', sessionIds: ['session-repair-0001'], createdAt: 'x', updatedAt: 'y' },
+        },
+      },
+    }, null, 2)}\n`);
+
+    const outcome = await repairWorkspace(layout);
+    assert.deepEqual(outcome.repaired, ['session-repair-0001']);
+    const repaired = JSON.parse(await readFile(layout.workspaceFile, 'utf8'));
+    assert.deepEqual(repaired.global.archivedSessionIds, []);
+    assert.deepEqual(repaired.tables.workspaces['ws-1'].sessionIds, []);
+    // Idempotent: a second pass has nothing to do.
+    assert.deepEqual((await repairWorkspace(layout)).repaired, []);
+  });
+
+  it('reads the ledger tail without trusting a torn first line', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-ledger-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(path.dirname(layout.ledgerFile), { recursive: true });
+    await writeFile(layout.ledgerFile, '{"torn":\n{"at":"x","sessionId":"session-a-0001"}\nnot json\n{"at":"y","sessionId":"session-b-0001"}\n');
+    const ids = await readDeletedIds(layout);
+    assert.deepEqual(ids, ['session-b-0001', 'session-a-0001']);
+  });
+
+  it('leaves the journal in place when a deletion is cancelled after it starts', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-abort-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const projectDir = path.join(layout.sessionsRoot, projectKey('/tmp/abort'));
+    const dir = path.join(projectDir, encodeSegment('session-abort-0001'));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-abort-0001","cwd":"/tmp/abort"}\n');
+    await writeFile(
+      path.join(layout.projectionsDir, 'session-abort-0001.json'),
+      '{"version":7,"record":{"identity":{},"rows":{}}}\n',
+    );
+    // A signal that reports "not aborted" while the plan is being read and
+    // fires once the deletion has definitely started. "Started" is observed as
+    // the journal appearing on disk, which is the same ordering a real
+    // cancellation has: the carrier's request signal aborts whenever the page
+    // goes away, normally mid-run rather than before the call.
+    const journalFile = path.join(layout.journalRoot, 'session-abort-0001.json');
+    const signal = {
+      get aborted() {
+        return existsSync(journalFile);
+      },
+      reason: undefined,
+      throwIfAborted() {
+        if (this.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
+      },
+    };
+    const outcome = await deleteSession({
+      id: 'session-abort-0001',
+      dshHome: home,
+      live: false,
+      signal,
+    }).then(() => 'resolved', (error) => error);
+    assert.equal(outcome.code, 'SESSION_ADMIN_ABORTED', 'a cancelled deletion must say it was cancelled');
+    // The journal survives on disk, which is what lets a later run name the
+    // session instead of leaving a ghost nobody can find.
+    const journal = JSON.parse(await readFile(journalFile, 'utf8'));
+    assert.equal(journal.sessionId, 'session-abort-0001');
+    assert.deepEqual(await listPendingDeletions({ dshHome: home }).then((rows) => rows.map((row) => row.sessionId)), ['session-abort-0001']);
+    // The conversation is untouched, so finishing it is safe.
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl'), 'utf8').then(() => true), true);
+
+    // Recovery: the same operation without a signal completes and clears the record.
+    const finished = await deleteSession({ id: 'session-abort-0001', dshHome: home, live: false });
+    assert.equal(finished.sessionId, 'session-abort-0001');
+    assert.deepEqual(await listPendingDeletions({ dshHome: home }), []);
+    await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl'), 'utf8'), /ENOENT/);
   });
 });

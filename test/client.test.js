@@ -216,7 +216,9 @@ describe('client bundle', () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].endpoint, '/session-admin/inspect');
     assert.deepEqual(calls[0].payload, { sessionId: 'session-x-0001' });
-    assert.equal(calls[0].method, '/session-admin/inspect');
+    // The URL carries the channel; the envelope's method is the bare endpoint
+    // the carrier derives by stripping it.
+    assert.equal(calls[0].method, 'inspect');
     delete globalThis.fetch;
   });
 
@@ -236,7 +238,7 @@ describe('client bundle', () => {
     await new Promise((resolve) => setImmediate(resolve));
     // A non-OK envelope must throw, which the component catches into its error state.
     await assert.rejects(
-      () => plugin.rpcCall('/session-admin/delete', { sessionId: 'session-x-0001' }),
+      () => plugin.rpcCall('delete', { sessionId: 'session-x-0001' }),
       (error) => error.code === 'SESSION_ADMIN_LIVE_SESSION',
     );
     delete globalThis.fetch;
@@ -245,7 +247,7 @@ describe('client bundle', () => {
   it('rejects a non-200 response rather than reporting success', async () => {
     globalThis.fetch = async () => ({ ok: false, status: 401 });
     await assert.rejects(
-      () => plugin.rpcCall('/session-admin/delete', { sessionId: 'session-x-0001' }),
+      () => plugin.rpcCall('delete', { sessionId: 'session-x-0001' }),
       /HTTP 401/,
     );
     delete globalThis.fetch;
@@ -257,12 +259,12 @@ describe('client bundle', () => {
       envelope = { endpoint, headers: init.headers, body: JSON.parse(init.body) };
       return { ok: true, json: async () => ({ result: { ok: true, value: { queued: true } } }) };
     };
-    const value = await plugin.rpcCall('/session-admin/delete', { sessionId: 'session-x-0001', queue: true });
+    const value = await plugin.rpcCall('delete', { sessionId: 'session-x-0001', queue: true });
     assert.deepEqual(value, { queued: true });
     assert.equal(envelope.endpoint, '/session-admin/delete');
     assert.equal(envelope.headers['content-type'], 'application/json');
     assert.equal(envelope.body.type, 'client-request');
-    assert.equal(envelope.body.method, '/session-admin/delete');
+    assert.equal(envelope.body.method, 'delete');
     assert.equal(typeof envelope.body.rpcId, 'string');
     assert.deepEqual(envelope.body.payload, { sessionId: 'session-x-0001', queue: true });
     delete globalThis.fetch;

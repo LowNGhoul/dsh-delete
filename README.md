@@ -88,7 +88,7 @@ In `cordis.patch.yml`, under the plugin's row:
 | `enableCommand` | `true` | Register the `/delete` command. |
 | `commandName` | `delete` | Rename that command. |
 | `enableRpc` | `true` | Serve the browser channel the header action uses. |
-| `journal` | `true` | Write the deletion ledger and the finish-on-close journals. |
+| `journal` | `true` | Write the deletion ledger, the finish-on-close journals, and the workspace repair record. |
 | `finishOnClose` | `true` | Complete a queued deletion as soon as its session closes. |
 | `dshHome`, `sessionsRoot`, `storagesRoot` | resolved | Point at a non-default harness home or store. |
 
@@ -96,18 +96,32 @@ In `cordis.patch.yml`, under the plugin's row:
 
 Every deletion path requires a deliberate act. The GUI needs a second press in a
 dialog that first states what will go. The CLI refuses without `--yes` and prints
-the same preview instead. Deletions are journalled before they start and recorded
-after they finish, so an interrupted one leaves evidence and can be finished
-idempotently:
+the same preview instead.
+
+A deletion has to prove itself before it reports success. It refuses when the
+stored log declares a different session than the one you asked for, and when only
+orphan metadata exists with no conversation log left. After removing, it
+re-checks every path and fails loudly (`SESSION_ADMIN_DELETION_INCOMPLETE`) if
+anything survived. Cancelling mid-run leaves a journal, so the session can be
+named and finished later:
 
 ```sh
-dsh-session-admin recover
+dsh-session-admin recover            # list unfinished deletions
+dsh-session-admin repair             # re-apply every past deletion to workspace.json
 ```
 
-The engine refuses a symlinked store entry rather than following it, validates
-every session id against a strict pattern before it becomes a path, and rewrites
-`workspace.json` atomically while preserving its file mode. `SECURITY.md` walks
-through each threat and names the control and the test that covers it.
+`repair` exists because the running harness keeps the workspace registry in
+memory and can restore a deleted id on its next unrelated write. The plugin runs
+the repair at startup and before each deletion, so the file converges.
+
+The engine refuses a symlinked store entry rather than following it, including a
+symlinked project directory or a symlinked `sessions` root, decides containment
+on canonical paths rather than lexical ones, validates every session id against a
+strict pattern before it becomes a path, and rewrites `workspace.json` atomically
+while preserving its file mode. `SECURITY.md` walks through each threat and names
+the control and the test that covers it, along with the two things a deletion
+knowingly does not reach: shared attachment bytes and content copied into a forked
+child session.
 
 ## Tests
 
@@ -115,11 +129,16 @@ through each threat and names the control and the test that covers it.
 npm test
 ```
 
-52 tests build their own store under a temporary directory. They cover the
-deletion itself, the refusals (live sessions, unknown ids, hostile payloads,
-symlinked directories, prototype-polluting documents), the host plugin's policy,
-the wire contract, and the command surface. Nothing in the suite reads or writes
-a real `$DSH_HOME`.
+71 tests build their own store under a temporary directory. They cover the
+deletion itself, the false-positive guards (generation-zero logs, hand-renamed
+project directories, orphan metadata, mismatched identities), the refusals (live
+sessions, unknown ids, hostile payloads, symlinked directories and roots,
+prototype-polluting documents), the workspace repair cycle, the host plugin's
+policy, the wire contract, the browser bundle, and the command surface. The
+`real Cordis runtime` suite loads the actual `@deepseek-ai/cordis` that a dsh
+installation ships and puts the plugin through a real fiber tree; it skips itself
+where no dsh installation is present. Nothing in the suite reads or writes a real
+`$DSH_HOME`.
 
 ## License
 

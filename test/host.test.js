@@ -16,13 +16,13 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 import { zstdCompressSync } from 'node:zlib';
 
-import { RPC_CHANNEL, RPC_DELETE, RPC_INSPECT, RPC_PENDING, RPC_STORE } from '../lib/constants.js';
+import { RPC_CHANNEL, RPC_DELETE, RPC_INSPECT, RPC_PENDING, RPC_STORE, rpcUrl } from '../lib/constants.js';
 import { encodeSegment, projectKey } from '../lib/engine.js';
-import { Config, SessionAdmin, apply, inject, name } from '../lib/index.js';
+import plugin, { DEFAULTS, SessionAdmin, apply, inject, name, resolveConfig } from '../lib/index.js';
 import { describeInspection } from '../lib/report.js';
 
-/** Plugin config a deployment would resolve: the schema defaults. */
-const BASE_CONFIG = Object.fromEntries(Object.entries(Config).map(([key, field]) => [key, field.default]));
+/** Plugin config a deployment would resolve: the documented defaults. */
+const BASE_CONFIG = { ...DEFAULTS };
 
 /** @type {string[]} */
 const created = [];
@@ -176,10 +176,41 @@ describe('plugin shape', () => {
   it('declares the dependencies it cannot degrade without', () => {
     assert.equal(name, 'session-admin');
     assert.deepEqual(inject, ['sessions', 'sessionPersistence', 'storageDomain']);
-    assert.equal(Config.backup.default, false);
-    assert.equal(Config.enableCommand.default, true);
-    assert.equal(Config.enableRpc.default, true);
-    assert.equal(Config.finishOnClose.default, true);
+    assert.equal(DEFAULTS.backup, false);
+    assert.equal(DEFAULTS.enableCommand, true);
+    assert.equal(DEFAULTS.enableRpc, true);
+    assert.equal(DEFAULTS.finishOnClose, true);
+  });
+
+  it('declares no Cordis Config schema, which would crash the loader', () => {
+    // A plugin whose config is declared must export a Standard Schema; a plain
+    // descriptor object makes Cordis throw during resolution and takes the
+    // whole profile down at boot. The defaults live in lib/config.js instead.
+    assert.equal(Object.hasOwn(plugin, 'Config'), false);
+    assert.equal(typeof plugin.apply, 'function');
+    const defaults = resolveConfig(undefined);
+    assert.equal(defaults.commandName, 'delete');
+    assert.equal(defaults.backup, false);
+  });
+
+  it('treats a hostile config object as untrusted input', () => {
+    const normalized = resolveConfig({
+      commandName: '../../../bin/sh',
+      backup: 'yes',
+      enableCommand: 1,
+      dshHome: '',
+      journal: null,
+      surprise: true,
+    });
+    assert.equal(normalized.commandName, 'delete');
+    assert.equal(normalized.backup, false);
+    assert.equal(normalized.enableCommand, true);
+    assert.equal(normalized.dshHome, undefined);
+    assert.equal(normalized.journal, true);
+    assert.equal(Object.hasOwn(normalized, 'surprise'), false);
+    // A path-ish command name never reaches the registry.
+    const allowed = resolveConfig({ commandName: 'purge-all' });
+    assert.equal(allowed.commandName, 'purge-all');
   });
 
   it('provides the service and wires both transports on apply', async () => {
@@ -211,22 +242,29 @@ describe('plugin shape', () => {
   it('serves its own RPC channel, never the reserved shared one', () => {
     assert.equal(RPC_CHANNEL, '/session-admin');
     assert.notEqual(RPC_CHANNEL, '/api');
-    assert.equal(RPC_INSPECT, '/session-admin/inspect');
-    assert.equal(RPC_DELETE, '/session-admin/delete');
-    assert.equal(RPC_PENDING, '/session-admin/pending');
-    assert.equal(RPC_STORE, '/session-admin/store');
+    // Endpoints are relative names: the carrier strips the channel prefix and
+    // refuses an envelope whose method is not the remainder.
+    assert.deepEqual([RPC_INSPECT, RPC_DELETE, RPC_PENDING, RPC_STORE], ['inspect', 'delete', 'pending', 'store']);
+    assert.equal(rpcUrl(RPC_DELETE), '/session-admin/delete');
+    for (const endpoint of [RPC_INSPECT, RPC_DELETE, RPC_PENDING, RPC_STORE]) {
+      assert.equal(endpoint.includes('/'), false, 'an endpoint name carries no separator');
+    }
   });
 
   it('keeps the client bundle’s inlined vocabulary identical to the shared constants', async () => {
     const bundle = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
     // The bundle is a classic script the page loads directly, so it cannot
     // import the constants module; this is the check that keeps the copy honest.
-    for (const literal of ['dsh-session-admin', 'session-admin-delete', '/session-admin/inspect', '/session-admin/delete']) {
+    for (const literal of ['dsh-session-admin', 'session-admin-delete', '/session-admin']) {
       assert.ok(bundle.includes(`'${literal}'`), `client bundle is missing ${literal}`);
     }
     assert.equal(bundle.includes('import '), false, 'client bundle must not contain an import statement');
     assert.ok(bundle.includes('window.__ModuleLoader__.load('));
     assert.ok(bundle.includes("require('react')"));
+    // The endpoint names travel in the envelope, not in the URL alone.
+    for (const verb of ["const RPC_INSPECT = 'inspect'", "const RPC_DELETE = 'delete'"]) {
+      assert.ok(bundle.includes(verb), `client bundle is missing ${verb}`);
+    }
     assert.equal(bundle.includes('createElement'), true);
   });
 });
@@ -358,8 +396,18 @@ describe('RPC channel', () => {
     apply(ctx, { ...BASE_CONFIG, dshHome: home });
     return {
       ctx,
-      call: async (endpoint, payload) => {
+      /**
+       * Invoke the channel the way the real carrier does: the endpoint it hands
+       * the handler is the path with the channel prefix stripped, and a request
+       * whose envelope disagrees with that is refused before dispatch.
+       *
+       * @param {string} path - an `endpoint` name, or an absolute path below the channel.
+       * @param {unknown} payload - decoded request body.
+       * @returns {Promise<any>} the handler's envelope.
+       */
+      call: async (path, payload) => {
         assert.ok(handler !== undefined, 'channel handler was not registered');
+        const endpoint = path.startsWith(`${RPC_CHANNEL}/`) ? path.slice(RPC_CHANNEL.length + 1) : path;
         return handler(endpoint, payload, new AbortController().signal);
       },
     };
