@@ -165,6 +165,13 @@ installation ships and puts the plugin through a real fiber tree; it skips itsel
 where no dsh installation is present. Nothing in the suite reads or writes a real
 `$DSH_HOME`.
 
+## Development notes
+
+`RETROSPECTIVE.md` is an account of how this was built: what held up, the four
+defects an external review reproduced, and why the tests that existed did not
+catch them. It is written against the commit history, so every claim in it can be
+checked with `git log`.
+
 ## License
 
 MIT.
