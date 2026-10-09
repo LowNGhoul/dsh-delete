@@ -414,3 +414,44 @@ describe('dialog component', () => {
     assert.ok(texts.some((text) => /not archiving/i.test(text)), 'the dialog must say it is not archiving');
   });
 });
+
+describe('early press guard', () => {
+  /**
+   * Flatten the display text of an element's children.
+   *
+   * @param {unknown} node - an element, array, or string.
+   * @returns {string} the concatenated text.
+   */
+  function labelOf(node) {
+    if (typeof node === 'string') return node;
+    if (node === null || typeof node !== 'object') return '';
+    if (Array.isArray(node)) return node.map(labelOf).join(' ');
+    return [node.props?.children, ...(node.children ?? [])].map(labelOf).join(' ');
+  }
+
+  it('keeps the destructive control disabled until the inspection answered', () => {
+    // The loading phase is rendered directly: the dialog is visible before the
+    // inspection resolves, and the destructive control must already be inert.
+    React.__clear();
+    const element = React.__render(() => plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} }));
+    /** @type {{ props: Record<string, unknown>, label: string }[]} */
+    const buttons = [];
+    (function walk(node) {
+      if (node === null || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const child of node) walk(child);
+        return;
+      }
+      if (!('type' in node) || !('props' in node)) return;
+      if (node.type === 'button') buttons.push({ props: node.props, label: labelOf(node.children ?? []) });
+      for (const child of node.children ?? []) walk(child);
+    })(element);
+
+    const destructive = buttons.find((entry) => /delete permanently/i.test(entry.label));
+    assert.ok(
+      destructive !== undefined,
+      `the destructive control must exist in the loading phase; found ${JSON.stringify(buttons.map((entry) => entry.label))}`,
+    );
+    assert.equal(destructive.props.disabled, true, 'an early press must not reach the host');
+  });
+});

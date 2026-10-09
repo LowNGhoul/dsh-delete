@@ -238,6 +238,11 @@ conversation with no way back.
 - A deletion that is interrupted is journalled in
   `<home>/session-admin/pending/` and can be listed (`recover`, `/session-admin/pending`)
   and finished idempotently.
+- A deletion that cannot run yet, because the session is open, is recorded in the
+  same directory before the request is acknowledged. That record is what makes
+  the deferral real: the alternative, an in-memory queue, is discarded by the
+  very restart the operator performs to let the deletion happen. Startup loads
+  the records and finishes every one whose session is not live.
 
 ### 3.9 Denial of service and resource exhaustion
 

@@ -46,6 +46,17 @@ control:
   which would have thrown during plugin resolution and taken the whole profile
   down at boot. Defaults now live in `lib/config.js` and are applied in `apply`.
 
+- **A deferred deletion was forgotten by the restart it was waiting for.** A
+  session that is open cannot be removed, so the dialog offers to delete it when
+  it closes; that request lived only in the host's memory. Restarting, which is
+  exactly what the operator does next, discarded it and the conversation was
+  still there. The queue is now written to disk before the request is
+  acknowledged, loaded again at startup, and completed there — a restart now
+  finishes the deletion instead of cancelling it. `dsh-session-admin settle`
+  does the same from outside a server. The delete control is also held disabled
+  until the inspection answers, so an early press cannot reach the host and come
+  back as an unexplained refusal.
+
 Two known limits are documented rather than papered over: the running harness can
 restore a deleted id into `workspace.json` from its in-memory copy (mitigated by
 `repair`, which runs at startup and before every deletion), and the CLI cannot ask

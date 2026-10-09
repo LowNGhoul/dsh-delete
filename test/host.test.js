@@ -576,7 +576,11 @@ describe('RPC channel', () => {
       const pending = await server.call('/session-admin/pending', envelope('pending', {}));
       assert.equal(pending.body.result.ok, true);
       assert.equal(pending.body.result.value.queued.length, 1);
-      assert.deepEqual(pending.body.result.value.unfinished, []);
+      // The queue is durable, so the same record is visible as a pending
+      // deletion on disk — that is what lets an earlier run's deferral survive.
+      assert.equal(pending.body.result.value.unfinished.length, 1);
+      assert.equal(pending.body.result.value.unfinished[0].kind, 'queued');
+      assert.equal(pending.body.result.value.unfinished[0].sessionId, id);
 
       const repaired = await server.call('/session-admin/repair', envelope('repair', {}));
       assert.equal(repaired.body.result.ok, true);
@@ -708,5 +712,55 @@ describe('search index disclosure', () => {
     // No service at all is not an error.
     const absent = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
     assert.equal(absent.searchIndexPath(), null);
+  });
+});
+
+describe('deferred deletions across a restart', () => {
+  it('finishes a live session’s deferral in the next process, which is why the operator restarted', async () => {
+    const { home, id, dir } = await makeStore();
+    // Run one: the session is open, so it can only be deferred. The record is
+    // written to disk before the caller is told the request was accepted.
+    const live = new FakeContext(services([id]));
+    const first = new SessionAdmin(live, { ...BASE_CONFIG, dshHome: home });
+    const outcome = await first.queue(id, { by: 'browser' });
+    assert.equal(outcome.queued, true);
+    assert.equal(await readFile(path.join(home, 'session-admin', 'pending', `${id}.json`), 'utf8').then(() => true), true);
+
+    // Run two: a brand-new process, no memory of run one, with nothing live.
+    const second = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
+    assert.equal(second.listQueued().length, 0, 'a fresh process starts with an empty in-memory queue');
+    assert.equal(await second.loadQueue(), 1, 'the durable record is what it starts from');
+    assert.deepEqual(second.listQueued().map((entry) => entry.sessionId), [id]);
+
+    const settled = await second.finishDeferredDeletions();
+    assert.deepEqual(settled.failed, []);
+    assert.deepEqual(settled.settled.map((entry) => entry.sessionId), [id]);
+    assert.equal(second.listQueued().length, 0);
+    await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8'), /ENOENT/);
+  });
+
+  it('does not finish a deferral while the session is still live', async () => {
+    const { home, id, dir } = await makeStore();
+    const ctx = new FakeContext(services([id]));
+    const admin = new SessionAdmin(ctx, { ...BASE_CONFIG, dshHome: home });
+    await admin.queue(id, { by: 'browser' });
+    // Same process, session still open: settling must leave it for the close
+    // listener rather than removing a log an agent still holds.
+    const outcome = await admin.finishDeferredDeletions();
+    assert.deepEqual(outcome.settled, []);
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8').then(() => true), true);
+  });
+
+  it('forgets a deferral the operator took back', async () => {
+    const { home, id, dir } = await makeStore();
+    const live = new FakeContext(services([id]));
+    const first = new SessionAdmin(live, { ...BASE_CONFIG, dshHome: home });
+    await first.queue(id, { by: 'browser' });
+    assert.equal(first.unqueue(id), true);
+
+    const second = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
+    assert.equal(await second.loadQueue(), 0, 'a cancelled deferral must not come back on restart');
+    assert.deepEqual((await second.finishDeferredDeletions()).settled, []);
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8').then(() => true), true);
   });
 });

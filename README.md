@@ -77,11 +77,13 @@ hash. The same bytes are shared by every session that ever attached them, so a
 per-session deletion cannot own them. The confirmation dialog reports how many a
 session referenced and leaves the bytes in place.
 
-**The session you are currently in.** A live session's agent holds an open write
-handle on its log; removing the file underneath it would lose whatever it writes
-next. The dialog offers to queue the deletion instead, and it completes the
-moment you switch to another conversation. The CLI has no such limitation
-because it runs in its own process.
+**Not immediately: the session you are currently in.** A live session's agent
+holds an open write handle on its log, so removing the file underneath it would
+lose whatever it writes next. The dialog offers to queue the deletion instead.
+The queue is written to disk, so it survives the restart that makes the deletion
+possible: the conversation goes when it closes, and also on the next `dsh` start
+if you restart first. `dsh-session-admin settle` finishes anything still waiting
+from outside a running server.
 
 The session directory is removed as a unit, so `session.lock`, older format
 generations, and migration staging files inside it go too. `SECURITY.md` lists
@@ -115,6 +117,7 @@ anything survived. Cancelling mid-run leaves a journal, so the session can be
 named and finished later:
 
 ```sh
+dsh-session-admin settle             # finish anything queued or interrupted
 dsh-session-admin recover            # list unfinished deletions
 dsh-session-admin repair             # re-apply every past deletion to workspace.json
 ```

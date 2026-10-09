@@ -21,13 +21,16 @@ import {
   inspectSession,
   isSessionId,
   listPendingDeletions,
+  listQueueRecords,
   projectKey,
   readDeletedIds,
   readProjectionTitle,
   readSessionHeader,
   repairWorkspace,
   resolveLayout,
+  settleQueuedDeletions,
   summarizeStore,
+  writeQueueRecord,
 } from '../lib/engine.js';
 import {
   InvalidSessionIdError,
@@ -811,5 +814,86 @@ describe('workspace bookkeeping repair', () => {
     assert.equal(finished.sessionId, 'session-abort-0001');
     assert.deepEqual(await listPendingDeletions({ dshHome: home }), []);
     await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl'), 'utf8'), /ENOENT/);
+  });
+});
+
+describe('durable deferred deletions', () => {
+  /**
+   * Create a store holding one session.
+   *
+   * @param {string} id - session id.
+   * @returns {Promise<{ home: string, layout: ReturnType<typeof resolveLayout>, dir: string }>} the store.
+   */
+  async function storeWith(id) {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-queue-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const dir = path.join(layout.sessionsRoot, projectKey('/tmp/queue'), encodeSegment(id));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), `{"type":"session","version":3,"id":"${id}","cwd":"/tmp/queue"}\n`);
+    await writeFile(path.join(layout.projectionsDir, `${id}.json`), '{"version":7,"record":{"identity":{},"rows":{}}}\n');
+    return { home, layout, dir };
+  }
+
+  it('records a deferral on disk before reporting it queued', async () => {
+    const id = 'session-queue-0001';
+    const { layout } = await storeWith(id);
+    const file = await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    assert.ok(file.endsWith('session-queue-0001.json'));
+    const records = await listQueueRecords({ dshHome: layout.dshHome });
+    assert.equal(records.length, 1);
+    assert.equal(records[0].kind, 'queued');
+    assert.equal(records[0].by, 'browser');
+    assert.equal(records[0].remaining.length, 2);
+  });
+
+  it('finishes a deferral from an earlier process, as a restart must', async () => {
+    const id = 'session-queue-0002';
+    const { layout, dir } = await storeWith(id);
+    await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    // The session was open in the process that recorded the deferral, so that
+    // process could not remove it. Nothing here is live: the record is the whole
+    // reason the deletion happens now.
+    const outcome = await settleQueuedDeletions({ dshHome: layout.dshHome });
+    assert.deepEqual(outcome.failed, []);
+    assert.deepEqual(outcome.settled.map((entry) => entry.sessionId), [id]);
+    await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl'), 'utf8'), /ENOENT/);
+    assert.deepEqual(await listQueueRecords({ dshHome: layout.dshHome }), []);
+    const ledger = await readFile(layout.ledgerFile, 'utf8');
+    assert.ok(ledger.includes(id), 'the completed deletion must be ledgered like any other');
+  });
+
+  it('leaves a session alone when the caller says it is still live', async () => {
+    const id = 'session-queue-0003';
+    const { layout, dir } = await storeWith(id);
+    await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    const outcome = await settleQueuedDeletions({ dshHome: layout.dshHome, live: () => true });
+    assert.deepEqual(outcome.settled, []);
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl'), 'utf8').then(() => true), true);
+    assert.equal((await listQueueRecords({ dshHome: layout.dshHome })).length, 1);
+  });
+
+  it('clears a record whose session is already gone, without failing', async () => {
+    const id = 'session-queue-0004';
+    const { layout } = await storeWith(id);
+    await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    await deleteSession({ id, dshHome: layout.dshHome, live: false });
+    // deleteSession clears its own record; write one back to simulate an
+    // interrupted run leaving a record for a session that is already gone.
+    await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    const outcome = await settleQueuedDeletions({ dshHome: layout.dshHome });
+    assert.deepEqual(outcome.cleared, [id]);
+    assert.deepEqual(outcome.failed, []);
+    assert.deepEqual(await listQueueRecords({ dshHome: layout.dshHome }), []);
+  });
+
+  it('is idempotent across two runs', async () => {
+    const id = 'session-queue-0005';
+    const { layout } = await storeWith(id);
+    await writeQueueRecord({ layout, sessionId: id, by: 'browser' });
+    const first = await settleQueuedDeletions({ dshHome: layout.dshHome });
+    const second = await settleQueuedDeletions({ dshHome: layout.dshHome });
+    assert.equal(first.settled.length, 1);
+    assert.deepEqual(second, { settled: [], cleared: [], failed: [] });
   });
 });

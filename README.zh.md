@@ -57,9 +57,10 @@ npx dsh-session-admin delete <session-id> --yes
 **附件。** `$DSH_HOME/attachments/v1` 按内容哈希存放图片和文件，同样的字节被所有用过它的
 会话共用，单删一个会话并不拥有它们。弹窗会把该会话引用过的附件数量报给你，字节留在原地。
 
-**你正在用的那个会话。** 活跃会话的 agent 对日志持有写入句柄，把文件从它脚下抽走会丢掉
-它接下来要写的内容。这种情况下弹窗会改成「关闭后删除」，等你切到别的会话时自动完成。
-命令行工具没这个限制，因为它在自己的进程里跑。
+**不能立刻删的是：你正在看的那个会话。** 活跃会话的 agent 对日志持有写入句柄，把文件从它
+脚下抽走会丢掉它接下来要写的内容。这种情况弹窗会改成「关闭后删除」，而且**队列是写到磁盘上
+的**——所以「重启」恰恰是让它生效的那一步：会话关闭时删除，如果你先重启了，下一次 dsh 启动
+时也会自动补做完。`dsh-session-admin settle` 可以在没有服务运行时把还等着的删除一次做完。
 
 ## 配置项
 
@@ -85,6 +86,7 @@ npx dsh-session-admin delete <session-id> --yes
 `SESSION_ADMIN_DELETION_INCOMPLETE`。中途取消会留下待办记录，之后可以查出来并补完：
 
 ```sh
+dsh-session-admin settle             # 把排队中/中断的删除一次做完
 dsh-session-admin recover            # 列出没做完的删除
 dsh-session-admin repair             # 把历史删除重新应用到 workspace.json
 ```
