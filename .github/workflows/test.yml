@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The engine uses the built-in Zstandard API and `node --test`, so the
+        # floor is the same one dsh declares for itself.
+        node: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Unit tests (no dependencies to install)
+        run: node --test 'test/*.test.js'
+      - name: CLI smoke test
+        run: |
+          set -euo pipefail
+          HOME_DIR="$(mktemp -d)"
+          node lib/cli.js store --dsh-home "$HOME_DIR"
+          node lib/cli.js list --dsh-home "$HOME_DIR"
+          node lib/cli.js recover --dsh-home "$HOME_DIR"
+      - name: The CLI must refuse a deletion without --yes
+        run: |
+          set -euo pipefail
+          HOME_DIR="$(mktemp -d)"
+          node -e "
+            const { mkdirSync, writeFileSync } = require('node:fs');
+            const dir = process.argv[1] + '/sessions/--tmp-x--/session-ci-0001';
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(dir + '/session.v3.jsonl', JSON.stringify({ type: 'session', version: 3, id: 'session-ci-0001', cwd: '/tmp/x' }) + '\n');
+          " "$HOME_DIR"
+          if node lib/cli.js delete session-ci-0001 --dsh-home "$HOME_DIR"; then
+            echo 'the CLI deleted without --yes' >&2
+            exit 1
+          fi
+          test -f "$HOME_DIR/sessions/--tmp-x--/session-ci-0001/session.v3.jsonl"
+          node lib/cli.js delete session-ci-0001 --dsh-home "$HOME_DIR" --yes
+          test ! -e "$HOME_DIR/sessions/--tmp-x--/session-ci-0001"

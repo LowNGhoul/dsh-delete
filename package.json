@@ -1,0 +1,55 @@
+{
+  "name": "dsh-session-admin",
+  "version": "0.1.0",
+  "description": "Permanently delete DeepSeek Harness (dsh) conversations everywhere they are stored — append-only session logs, projection checkpoints, workspace membership and archive flags — with a GUI delete action and a /delete command.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./engine": "./lib/engine.js",
+    "./errors": "./lib/errors.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-session-admin": "./lib/cli.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "session",
+    "conversation",
+    "delete",
+    "purge",
+    "privacy"
+  ]
+}

@@ -1,0 +1,33 @@
+# dsh-session-admin bundle patch: inserts the plugin's host row into a dsh profile.
+#
+# The row is dual-face. Its host half provides `ctx.sessionAdmin`, registers the
+# `/delete` command, and serves the plugin's own authenticated RPC channel; its
+# browser half (declared by `dsh.client` in package.json) adds the delete action
+# to the conversation header. One row owns both, so the GUI action can never be
+# present without the host capability behind it.
+#
+# Install with:
+#   dsh plugin --profile web add /absolute/path/to/dsh-session-admin
+#
+# `dsh plugin add` appends this package to the profile's `dsh.profile.bundles`
+# list, which is what makes this patch layer load. The row id matches
+# `package.json`'s package name so a `cordis.patch.yml` override can target it.
+
+- insert:
+    - id: dsh-session-admin
+      name: dsh-session-admin
+      config:
+        # Move bytes into <dshHome>/session-admin/trash instead of unlinking them.
+        # Turn this on for the first deletions on a machine you care about; the
+        # session still disappears from dsh either way, and the trash directory
+        # can be deleted once you are satisfied.
+        backup: false
+        # The human `/delete` command.
+        enableCommand: true
+        commandName: delete
+        # The browser RPC channel the header action posts to.
+        enableRpc: true
+        # Append-only deletion ledger plus finish-on-close journals.
+        journal: true
+        # Delete a session marked while open as soon as its agent releases it.
+        finishOnClose: true
