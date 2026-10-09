@@ -510,3 +510,40 @@ describe('search index disclosure', () => {
     assert.ok(describeInspection(withIndex).some((line) => line.includes('/var/lib/dsh/session-query.sqlite')));
   });
 });
+
+describe('resume race', () => {
+  it('refuses when the session becomes live between planning and removal', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-race-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const projectDir = path.join(layout.sessionsRoot, projectKey('/tmp/race'));
+    const dir = path.join(projectDir, encodeSegment('session-race-0001'));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-race-0001","cwd":"/tmp/race"}\n');
+    await writeFile(
+      path.join(layout.projectionsDir, 'session-race-0001.json'),
+      '{"version":7,"record":{"identity":{},"rows":{"title":{"ver":1,"seq":1,"val":"Race"}}}}\n',
+    );
+    // Cold when planned, live by the time the log would be removed.
+    let asked = 0;
+    await assert.rejects(
+      () => deleteSession({
+        id: 'session-race-0001',
+        dshHome: home,
+        live: false,
+        isLiveNow: () => {
+          asked += 1;
+          return true;
+        },
+      }),
+      LiveSessionError,
+    );
+    assert.ok(asked >= 1, 'the engine must re-ask before writing anything');
+    // Nothing was written at all: the log, the projection record and the
+    // workspace membership all survive, so the user can simply try again.
+    assert.equal(await readFile(path.join(dir, 'session.v3.jsonl'), 'utf8').then(() => true), true);
+    assert.equal(await readFile(path.join(layout.projectionsDir, 'session-race-0001.json'), 'utf8').then(() => true), true);
+    const surviving = await inspectSession({ id: 'session-race-0001', dshHome: home, live: false });
+    assert.equal(surviving.title, 'Race');
+  });
+});
