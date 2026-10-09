@@ -16,6 +16,16 @@ dsh plugin --profile web add /absolute/path/to/dsh-session-admin
 Restart the profile afterwards. The command appends the package to the profile's
 bundle list, which is what loads the plugin's composition patch.
 
+From a checkout there is also `./install.sh`, which runs the test suite, prints
+what the store currently holds, and then performs the same install.
+`./install.sh web --uninstall` reverses it.
+
+The CLI works without any installation:
+
+```sh
+node lib/cli.js list --dsh-home ~/.dsh
+```
+
 ## Use it
 
 **From the GUI.** Open the conversation and press the trash icon in the
