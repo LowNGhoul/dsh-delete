@@ -558,6 +558,26 @@ describe('RPC channel', () => {
     }
   });
 
+  it('deletes a live session when the caller confirms with force', async () => {
+    const { home, id, dir } = await makeStore();
+    const server = await rpcServer({ home, live: [id] });
+    try {
+      // A live session is refused without the confirmation.
+      const refused = await server.call('/session-admin/delete', envelope('delete', { sessionId: id }));
+      assert.equal(refused.body.result.error.code, 'SESSION_ADMIN_LIVE_SESSION');
+
+      // The confirmation is what the browser sends after its panel has shown
+      // what will be removed; it is the only way this path is reachable.
+      const forced = await server.call('/session-admin/delete', envelope('delete', { sessionId: id, force: true }));
+      assert.equal(forced.body.result.ok, true);
+      assert.equal(forced.body.result.value.forced, true);
+      assert.ok(forced.body.result.value.report.removedCount > 0);
+      await assert.rejects(() => readFile(path.join(dir, 'session.v3.jsonl.zstd'), 'utf8'), /ENOENT/);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('reports a live session as live and queues only when asked', async () => {
     const { home, id } = await makeStore();
     const server = await rpcServer({ home, live: [id] });

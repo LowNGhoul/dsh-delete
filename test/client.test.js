@@ -245,7 +245,7 @@ describe('client bundle', () => {
     delete globalThis.fetch;
   });
 
-  it('offers to queue rather than promising a deletion it cannot perform', async () => {
+  it('states that a live session will be closed, and still offers one press', async () => {
     globalThis.fetch = async () => ({
       ok: true,
       json: async () => ({
@@ -263,8 +263,27 @@ describe('client bundle', () => {
     ReactStub.__reset();
     const element = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
     const texts = collectText(element);
-    assert.ok(texts.some((text) => /as soon as it closes/i.test(text)), 'a live session must be offered as a queued deletion');
-    assert.equal(texts.some((text) => /^Delete permanently$/.test(text)), false, 'a live session must not offer an immediate deletion');
+    // Being open is disclosed as a consequence, not turned into a slower path:
+    // the deletion still happens on this press.
+    assert.ok(texts.some((text) => /you are reading/i.test(text)), 'the open session must be named as such');
+    assert.ok(texts.some((text) => /delete permanently/i.test(text)), 'one press must still be enough');
+    delete globalThis.fetch;
+  });
+
+  it('deletes with force, so the host does not defer it back', async () => {
+    /** @type {unknown} */
+    let payload;
+    globalThis.fetch = async (endpoint, init) => {
+      payload = JSON.parse(init.body).payload;
+      return {
+        ok: true,
+        json: async () => ({
+          result: { ok: true, value: { queued: false, forced: true, sessionId: 'session-x-0001', lines: ['Permanently deleted.'] } },
+        }),
+      };
+    };
+    await plugin.rpcCall('delete', { sessionId: 'session-x-0001', force: true });
+    assert.deepEqual(payload, { sessionId: 'session-x-0001', force: true });
     delete globalThis.fetch;
   });
 

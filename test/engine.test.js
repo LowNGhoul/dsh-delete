@@ -897,3 +897,65 @@ describe('durable deferred deletions', () => {
     assert.deepEqual(second, { settled: [], cleared: [], failed: [] });
   });
 });
+
+describe('forced deletion of a session that is open', () => {
+  /**
+   * Create a store with one session whose log is held open, the way a live
+   * agent holds it.
+   *
+   * @param {string} id - session id.
+   * @returns {Promise<{ home: string, layout: ReturnType<typeof resolveLayout>, dir: string, log: string, release: () => void }>} the store and an open handle.
+   */
+  async function openStore(id) {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-force-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const dir = path.join(layout.sessionsRoot, projectKey('/tmp/force'), encodeSegment(id));
+    await mkdir(dir, { recursive: true });
+    const log = path.join(dir, 'session.v3.jsonl');
+    await writeFile(log, `{"type":"session","version":3,"id":"${id}","cwd":"/tmp/force"}\n`);
+    await writeFile(path.join(layout.projectionsDir, `${id}.json`), '{"version":7,"record":{"identity":{},"rows":{}}}\n');
+    const { open } = await import('node:fs/promises');
+    const handle = await open(log, 'a');
+    return { home, layout, dir, log, release: () => handle.close() };
+  }
+
+  it('refuses an open session by default and removes it when forced', async () => {
+    const id = 'session-force-0001';
+    const store = await openStore(id);
+    try {
+      await assert.rejects(
+        () => deleteSession({ id, dshHome: store.home, live: true }),
+        LiveSessionError,
+      );
+      const report = await deleteSession({ id, dshHome: store.home, live: true, force: true });
+      assert.equal(report.forced, true);
+      // The directory entry is gone even though a handle still refers to the
+      // inode: that is what makes the deletion real without a restart.
+      assert.equal(await readFile(store.log, 'utf8').then(() => true, () => false), false);
+      assert.equal(await readdir(store.layout.projectionsDir).then((rows) => rows.length), 0);
+      assert.deepEqual(report.deferredCleanup, []);
+    } finally {
+      store.release();
+    }
+  });
+
+  it('clears a record left for a session whose content is already gone', async () => {
+    const id = 'session-force-0002';
+    const store = await openStore(id);
+    try {
+      // The shape a forced deletion can leave behind: the projection record and
+      // every log generation are gone, only the (now empty) session directory
+      // and a journal record remain. There is nothing left to delete, so the
+      // record must be cleared rather than reported as a failure forever.
+      await writeQueueRecord({ layout: store.layout, sessionId: id, by: 'browser' });
+      await rm(store.log, { force: true });
+      const outcome = await settleQueuedDeletions({ dshHome: store.home });
+      assert.deepEqual(outcome.failed, []);
+      assert.deepEqual(outcome.cleared, [id]);
+      assert.deepEqual(await listQueueRecords({ dshHome: store.home }), []);
+    } finally {
+      store.release();
+    }
+  });
+});

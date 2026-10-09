@@ -46,6 +46,14 @@ control:
   which would have thrown during plugin resolution and taken the whole profile
   down at boot. Defaults now live in `lib/config.js` and are applied in `apply`.
 
+- **Deleting the conversation you are reading no longer needs a restart.** It
+  used to be refused, then deferred, then completed on the next start — three
+  steps for what a person experiences as one. On a POSIX filesystem the log's
+  directory entry can be unlinked while the agent still holds the file open, so a
+  confirmed deletion now removes it immediately; later writes from that handle go
+  to an unreachable inode. The dialog keeps its single confirmation, and the page
+  clears its selection and re-pulls the list so the row disappears from the
+  sidebar too. `allowLiveDeletion: false` restores the deferral model.
 - **A deferred deletion was forgotten by the restart it was waiting for.** A
   session that is open cannot be removed, so the dialog offers to delete it when
   it closes; that request lived only in the host's memory. Restarting, which is

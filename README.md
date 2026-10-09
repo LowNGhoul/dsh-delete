@@ -40,8 +40,10 @@ node lib/cli.js list --dsh-home ~/.dsh
 **From the GUI.** Open the conversation and press the trash icon in the
 conversation header, next to the other session actions. The dialog lists the
 title, project, stored size, how many artifacts will go, and which workspace
-rows the conversation belongs to. Nothing is removed until you press
-**Delete permanently**.
+rows the conversation belongs to, then one press removes it. That works for the
+conversation you are reading too: on a POSIX filesystem the log's directory
+entry is unlinked while the agent still holds the file open, so nothing waits for
+a restart.
 
 **From the command line, inside a conversation.**
 
@@ -77,13 +79,12 @@ hash. The same bytes are shared by every session that ever attached them, so a
 per-session deletion cannot own them. The confirmation dialog reports how many a
 session referenced and leaves the bytes in place.
 
-**Not immediately: the session you are currently in.** A live session's agent
-holds an open write handle on its log, so removing the file underneath it would
-lose whatever it writes next. The dialog offers to queue the deletion instead.
-The queue is written to disk, so it survives the restart that makes the deletion
-possible: the conversation goes when it closes, and also on the next `dsh` start
-if you restart first. `dsh-session-admin settle` finishes anything still waiting
-from outside a running server.
+**A session another process is using.** The host can only remove a session no
+other process holds. A second `dsh` instance running against the same store is
+the case that remains, and the CLI covers it. The deferral machinery is still
+there for the deployment that turns `allowLiveDeletion` off: a session marked
+while open is then recorded on disk and removed when it closes, or on the next
+start, and `dsh-session-admin settle` finishes anything still waiting.
 
 The session directory is removed as a unit, so `session.lock`, older format
 generations, and migration staging files inside it go too. `SECURITY.md` lists
@@ -99,6 +100,7 @@ In `cordis.patch.yml`, under the plugin's row:
 | `enableCommand` | `true` | Register the `/delete` command. |
 | `commandName` | `delete` | Rename that command. |
 | `enableRpc` | `true` | Serve the browser channel the header action uses. |
+| `allowLiveDeletion` | `true` | Let a confirmed deletion remove the session being read, instead of deferring it until it closes. |
 | `journal` | `true` | Write the deletion ledger, the finish-on-close journals, and the workspace repair record. |
 | `finishOnClose` | `true` | Complete a queued deletion as soon as its session closes. |
 | `dshHome`, `sessionsRoot`, `storagesRoot` | resolved | Point at a non-default harness home or store. |

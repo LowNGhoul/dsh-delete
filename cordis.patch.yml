@@ -31,3 +31,9 @@
         journal: true
         # Delete a session marked while open as soon as its agent releases it.
         finishOnClose: true
+        # Confirmed deletions remove the session even while it is the one being
+        # read. On a POSIX filesystem the log's directory entry is unlinked and
+        # the agent's surviving handle writes to an unreachable inode, so the
+        # conversation is gone at once. Set false to keep live sessions deferred
+        # until they close or the next start.
+        allowLiveDeletion: true
