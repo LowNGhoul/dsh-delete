@@ -7,8 +7,11 @@ short list of things only you can confirm on your machine.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Unit, host, client and CLI tests | `node --test 'test/*.test.js'` | 53 pass, 0 fail |
-| Tests pass from a fresh clone | `git clone <this repo> /tmp/x && cd /tmp/x && node --test 'test/*.test.js'` | 53 pass, 0 fail |
+| Unit, host, client and CLI tests | `node --test 'test/*.test.js'` | 71 pass, 0 fail |
+| Tests pass from a fresh clone | `git clone <this repo> /tmp/x && cd /tmp/x && node --test 'test/*.test.js'` | 71 pass, 0 fail |
+| The plugin runs in the real Cordis runtime | `node --test test/cordis.test.js` | 4 pass against the `@deepseek-ai/cordis` a dsh install ships; skips where none is present |
+| Containment: a symlinked store root, project directory, storages root or workspace unit | `node --test --test-name-pattern 'symlink' test/engine.test.js` | every case refused, nothing outside the store touched |
+| A deletion that finds no log refuses instead of reporting success | `node --test --test-name-pattern 'generation-zero\|orphan\|different session' test/engine.test.js` | named errors, log untouched |
 | The CLI refuses to delete without `--yes` | `node lib/cli.js delete <id> --dsh-home <copy>` | exit 1, file untouched |
 | A hostile id never reaches the filesystem | `node lib/cli.js delete '../etc/passwd' --yes` | `SESSION_ADMIN_INVALID_ID` |
 | A full deletion against a copy of a real store | see below | log, checkpoint, workspace row and archive flag all gone |
@@ -23,6 +26,9 @@ cp -R "$DSH_HOME" /tmp/store-copy
 node lib/cli.js inspect <session-id> --dsh-home /tmp/store-copy
 node lib/cli.js delete  <session-id> --yes --json --dsh-home /tmp/store-copy
 node lib/cli.js store --dsh-home /tmp/store-copy   # one fewer session
+ls  /tmp/store-copy/sessions/*/<session-id>        # no such directory
+ls  /tmp/store-copy/storages/session_projcache/sessions/<session-id>.json   # not found
+grep -c <session-id> /tmp/store-copy/storages/workspace.json                # 0
 ```
 
 ## Yours to confirm

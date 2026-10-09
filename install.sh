@@ -70,4 +70,6 @@ The standalone CLI also works without dsh running:
   node $SOURCE/lib/cli.js list
   node $SOURCE/lib/cli.js inspect <session-id>
   node $SOURCE/lib/cli.js delete <session-id> --yes
+  node $SOURCE/lib/cli.js repair        # re-apply past deletions to workspace.json
+  node $SOURCE/lib/cli.js recover       # list unfinished deletions
 EOF
