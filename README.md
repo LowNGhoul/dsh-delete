@@ -138,12 +138,14 @@ child session.
 npm test
 ```
 
-71 tests build their own store under a temporary directory. They cover the
+85 tests build their own store under a temporary directory. They cover the
 deletion itself, the false-positive guards (generation-zero logs, hand-renamed
 project directories, orphan metadata, mismatched identities), the refusals (live
 sessions, unknown ids, hostile payloads, symlinked directories and roots,
 prototype-polluting documents), the workspace repair cycle, the host plugin's
-policy, the wire contract, the browser bundle, and the command surface. The
+policy, the RPC channel over a real HTTP server, the browser bundle's
+registration into a slot registry that parks and resumes declarations, its
+rendered confirmation states, and the command surface. The
 `real Cordis runtime` suite loads the actual `@deepseek-ai/cordis` that a dsh
 installation ships and puts the plugin through a real fiber tree; it skips itself
 where no dsh installation is present. Nothing in the suite reads or writes a real

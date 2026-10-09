@@ -31,7 +31,16 @@ const ReactStub = (() => {
    */
   const createElement = (type, props, ...children) => ({ type, props: props ?? {}, children });
 
-  /** @type {unknown[][]} */
+  /**
+   * Hook state.
+   *
+   * The arrays are `const` and cleared in place. Replacing them would leave the
+   * `useState` closure writing into a detached array, so the next render would
+   * read nothing and a test would fail for a reason that has nothing to do with
+   * the bundle.
+   *
+   * @type {unknown[][]}
+   */
   const states = [];
   let cursor = 0;
   /** @type {Function[]} */
@@ -71,12 +80,49 @@ const ReactStub = (() => {
     __reset() {
       cursor = 0;
     },
+    /** Clear hook state between tests, in place. @returns {void} */
+    __clear() {
+      states.length = 0;
+      cursor = 0;
+      effects.length = 0;
+    },
     /** Effects registered during the last render. @returns {Function[]} the effect bodies. */
     __effects() {
       return effects.splice(0, effects.length);
     },
   };
 })();
+
+/**
+ * Every display string in a rendered element tree.
+ *
+ * Reads a component's own `line` prop as well as its children, because the
+ * dialog hands each consequence line to a small `Line` component.
+ *
+ * @param {unknown} element - a rendered element tree.
+ * @returns {string[]} the display strings.
+ */
+function collectText(element) {
+  /** @type {string[]} */
+  const found = [];
+  const walk = (node) => {
+    if (typeof node === 'string') {
+      found.push(node);
+      return;
+    }
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (!('type' in node) || !('props' in node)) return;
+    if (typeof node.props.line === 'string') found.push(node.props.line);
+    if (typeof node.props.children === 'string') found.push(node.props.children);
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(element);
+  return found;
+}
 
 /** @type {Record<string, unknown>|undefined} */
 let plugin;
@@ -167,6 +213,61 @@ describe('client bundle', () => {
     assert.equal(element.type, ReactStub.Fragment);
   });
 
+  it('offers the irreversible action with its consequence once the inspection resolved', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: {
+            sessionId: 'session-x-0001',
+            title: 'Doomed',
+            live: false,
+            lines: ['Session: session-x-0001', 'This cannot be undone.'],
+          },
+        },
+      }),
+    });
+    // Render, let the mount effect settle, then render the state it produced.
+    // Each render pass starts a fresh hook cursor: the stand-in has no reconciler
+    // to do it, so a test that renders twice must say where each pass begins.
+    ReactStub.__clear();
+    ReactStub.__reset();
+    plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
+    for (const effect of ReactStub.__effects()) effect();
+    await new Promise((resolve) => setImmediate(resolve));
+    ReactStub.__reset();
+    const element = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
+    const texts = collectText(element);
+    assert.ok(texts.includes('Cancel'), 'a cancel control must exist');
+    assert.ok(texts.some((text) => /delete permanently/i.test(text)), 'the confirm control must state what it does');
+    assert.ok(texts.some((text) => /cannot be undone/i.test(text)), 'the consequence must be shown, not implied');
+    delete globalThis.fetch;
+  });
+
+  it('offers to queue rather than promising a deletion it cannot perform', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: { sessionId: 'session-x-0001', title: 'Open', live: true, lines: ['Session: session-x-0001', 'This cannot be undone.'] },
+        },
+      }),
+    });
+    ReactStub.__clear();
+    ReactStub.__reset();
+    plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
+    for (const effect of ReactStub.__effects()) effect();
+    await new Promise((resolve) => setImmediate(resolve));
+    ReactStub.__reset();
+    const element = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
+    const texts = collectText(element);
+    assert.ok(texts.some((text) => /as soon as it closes/i.test(text)), 'a live session must be offered as a queued deletion');
+    assert.equal(texts.some((text) => /^Delete permanently$/.test(text)), false, 'a live session must not offer an immediate deletion');
+    delete globalThis.fetch;
+  });
+
   it('walks loading → ready → deleted through the real transport contract', async () => {
     /** @type {{ method: string, payload: unknown }[]} */
     const calls = [];
@@ -207,7 +308,7 @@ describe('client bundle', () => {
       };
     };
 
-    ReactStub.__reset();
+    ReactStub.__clear();
     plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
     // The first effect issues the inspection.
     const effects = ReactStub.__effects();

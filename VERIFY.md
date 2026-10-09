@@ -7,8 +7,8 @@ short list of things only you can confirm on your machine.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Unit, host, client and CLI tests | `node --test 'test/*.test.js'` | 71 pass, 0 fail |
-| Tests pass from a fresh clone | `git clone <this repo> /tmp/x && cd /tmp/x && node --test 'test/*.test.js'` | 71 pass, 0 fail |
+| Unit, host, client and CLI tests | `node --test 'test/*.test.js'` | 85 pass, 0 fail |
+| Tests pass from a fresh clone | `git clone <this repo> /tmp/x && cd /tmp/x && node --test 'test/*.test.js'` | 85 pass, 0 fail |
 | The plugin runs in the real Cordis runtime | `node --test test/cordis.test.js` | 4 pass against the `@deepseek-ai/cordis` a dsh install ships; skips where none is present |
 | Containment: a symlinked store root, project directory, storages root or workspace unit | `node --test --test-name-pattern 'symlink' test/engine.test.js` | every case refused, nothing outside the store touched |
 | A deletion that finds no log refuses instead of reporting success | `node --test --test-name-pattern 'generation-zero\|orphan\|different session' test/engine.test.js` | named errors, log untouched |
