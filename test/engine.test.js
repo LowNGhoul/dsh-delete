@@ -684,22 +684,11 @@ describe('symlinked ancestors (containment)', () => {
     assert.equal(await readFile(path.join(victimDir, 'IMPORTANT.txt'), 'utf8'), 'keep\n');
   });
 
-  it('does not unlink a projection record through a symlinked storages root', async () => {
-    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkstore-'));
-    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outstore-'));
-    const layout = resolveLayout({ dshHome: home });
-    await mkdir(layout.sessionsRoot, { recursive: true });
-    await mkdir(path.join(outside, 'session_projcache', 'sessions'), { recursive: true });
-    const victimRecord = path.join(outside, 'session_projcache', 'sessions', 'session-linked-store-0001.json');
-    await writeFile(victimRecord, '{"version":7,"record":{"identity":{},"rows":{}}}\n');
-    await symlink(outside, path.join(home, 'storages'), 'dir');
-
-    const report = await inspectSession({ id: 'session-linked-store-0001', dshHome: home, live: false }).catch((error) => error);
-    // The record is unreachable through a link (it is not store content), so
-    // either it is not found at all or it is reported without being touched.
-    assert.ok(report instanceof Error || report.projectionFiles.length === 0);
-    assert.equal(await readFile(victimRecord, 'utf8').then(() => true), true);
-  });
+  // A symlinked `storages` root is covered by 'refuses a store whose storages
+  // root is a symlink, and touches nothing outside' below: it asserts the
+  // refusal code, the surviving projection record, the surviving archive list
+  // and the surviving membership. This file previously carried a weaker version
+  // that only inspected, accepted any error, and never ran a deletion.
 
   it('refuses to rewrite a workspace unit that is a symlink', async () => {
     const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-linkws-'));
@@ -957,5 +946,123 @@ describe('forced deletion of a session that is open', () => {
     } finally {
       store.release();
     }
+  });
+});
+
+describe('combination regressions', () => {
+  /**
+   * Build a store with one session and an out-of-store directory it must never touch.
+   *
+   * @param {{ id: string, symlinkStorages?: boolean }} spec - what to build.
+   * @returns {Promise<{ home: string, layout: ReturnType<typeof resolveLayout>, dir: string, outside: string }>} the store.
+   */
+  async function paired(spec) {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-combo-'));
+    const layout = resolveLayout({ dshHome: home });
+    const dir = path.join(layout.sessionsRoot, projectKey('/tmp/combo'), encodeSegment(spec.id));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), `{"type":"session","version":3,"id":"${spec.id}","cwd":"/tmp/combo"}\n`);
+    const outside = await mkdtemp(path.join(tmpdir(), 'dsh-sa-outside-'));
+    if (spec.symlinkStorages === true) {
+      await mkdir(path.join(outside, 'session_projcache', 'sessions'), { recursive: true });
+      await writeFile(path.join(outside, 'session_projcache', 'sessions', `${spec.id}.json`), '{"version":7,"record":{"identity":{},"rows":{}}}\n');
+      await writeFile(path.join(outside, 'workspace.json'), `${JSON.stringify({
+        unit: { name: 'workspace', version: 2 },
+        global: { initialized: true, workspaceIds: ['ws-1'], archivedSessionIds: [spec.id] },
+        tables: { workspaces: { 'ws-1': { path: '/tmp/combo', title: 'combo', sessionIds: [spec.id], createdAt: 'a', updatedAt: 'b' } } },
+      }, null, 2)}\n`);
+      await symlink(outside, path.join(home, 'storages'), 'dir');
+    } else {
+      await mkdir(layout.projectionsDir, { recursive: true });
+      await writeFile(path.join(layout.projectionsDir, `${spec.id}.json`), '{"version":7,"record":{"identity":{},"rows":{}}}\n');
+    }
+    return { home, layout, dir, outside };
+  }
+
+  it('refuses a store whose storages root is a symlink, and touches nothing outside', async () => {
+    const id = 'session-combo-0001';
+    const store = await paired({ id, symlinkStorages: true });
+    // The projection record and the workspace unit both live under `storages`,
+    // so a link there decides where a deletion would edit and unlink. Every
+    // per-entry check still passes under a linked root, which is why the refusal
+    // has to be at the root.
+    await assert.rejects(
+      () => deleteSession({ id, dshHome: store.home, live: false }),
+      (error) => error.code === 'SESSION_ADMIN_STORAGE_SHAPE',
+    );
+    await assert.rejects(
+      () => inspectSession({ id, dshHome: store.home, live: false }),
+      (error) => error.code === 'SESSION_ADMIN_STORAGE_SHAPE',
+    );
+    // Nothing outside was read-and-reported, unlinked, or rewritten.
+    assert.equal(
+      await readFile(path.join(store.outside, 'session_projcache', 'sessions', `${id}.json`), 'utf8').then(() => true, () => false),
+      true,
+      'the out-of-store projection record must survive',
+    );
+    const workspace = JSON.parse(await readFile(path.join(store.outside, 'workspace.json'), 'utf8'));
+    assert.deepEqual(workspace.global.archivedSessionIds, [id], 'the out-of-store archive list must survive');
+    assert.deepEqual(workspace.tables.workspaces['ws-1'].sessionIds, [id], 'the out-of-store membership must survive');
+    assert.equal(await readFile(path.join(store.dir, 'session.v3.jsonl'), 'utf8').then(() => true, () => false), true);
+  });
+
+  it('combines a forced deletion with a backup without failing or double-trashing', async () => {
+    const id = 'session-combo-0002';
+    const store = await paired({ id });
+    const { open } = await import('node:fs/promises');
+    const handle = await open(path.join(store.dir, 'session.v3.jsonl'), 'a');
+    try {
+      // The generation is moved into the trash first, so mirroring the whole
+      // directory into the trash afterwards would collide. The interface sends
+      // exactly this combination whenever the delete action runs with backups on.
+      const report = await deleteSession({ id, dshHome: store.home, live: true, force: true, backup: true });
+      assert.equal(report.forced, true);
+      assert.ok(report.backedUpPaths.length >= 2, 'the bytes must be in the trash');
+      assert.deepEqual(report.deferredCleanup, [], 'nothing may be left for a later run');
+      assert.equal(await readdir(store.dir).then(() => true, () => false), false, 'the session directory must be gone');
+      // Every trashed copy is a distinct path: the same session must not be moved twice.
+      assert.equal(new Set(report.backedUpPaths).size, report.backedUpPaths.length);
+      const trashEntries = await readdir(path.join(store.home, 'session-admin', 'trash'));
+      assert.equal(trashEntries.length, 1, 'one deletion means one trash entry');
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('re-applies every past deletion, not just the last one', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-multi-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const ids = ['session-m1-0001', 'session-m2-0002', 'session-m3-0003', 'session-m4-0004'];
+    await writeFile(layout.workspaceFile, `${JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['ws-1'], archivedSessionIds: [...ids] },
+      tables: { workspaces: { 'ws-1': { path: '/tmp/multi', title: 'multi', sessionIds: [...ids], createdAt: 'a', updatedAt: 'b' } } },
+    }, null, 2)}\n`);
+    await mkdir(path.dirname(layout.ledgerFile), { recursive: true });
+    await writeFile(layout.ledgerFile, `${ids.map((id) => JSON.stringify({ at: 'x', sessionId: id })).join('\n')}\n`);
+
+    const outcome = await repairWorkspace(layout);
+    assert.deepEqual([...outcome.repaired].sort(), [...ids].sort());
+    assert.deepEqual(outcome.survivors, []);
+    // The file itself is the authority: every id must be gone from both lists.
+    const settled = JSON.parse(await readFile(layout.workspaceFile, 'utf8'));
+    assert.deepEqual(settled.global.archivedSessionIds, []);
+    assert.deepEqual(settled.tables.workspaces['ws-1'].sessionIds, []);
+    // And a second pass has nothing left to do.
+    assert.deepEqual((await repairWorkspace(layout)).repaired, []);
+  });
+});
+
+describe('repair contract', () => {
+  it('answers with the same shape whether or not it had work to do', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-repairshape-'));
+    const layout = resolveLayout({ dshHome: home });
+    // A store that needs no repair must still report `survivors`, or a caller
+    // that reads it unconditionally breaks on the quiet path.
+    const first = await repairWorkspace(layout);
+    assert.deepEqual(Object.keys(first).sort(), ['file', 'repaired', 'survivors']);
+    assert.deepEqual(first.repaired, []);
+    assert.deepEqual(first.survivors, []);
   });
 });

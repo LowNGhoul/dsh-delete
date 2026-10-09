@@ -65,6 +65,33 @@ control:
   until the inspection answers, so an early press cannot reach the host and come
   back as an unexplained refusal.
 
+### Fixed after an external review of the first release
+
+Four defects, each reproduced before it was fixed and each now pinned by a test:
+
+- **A symlinked `storages` root was not refused.** The root check covered
+  `sessions` only, so with `<home>/storages` pointing elsewhere a deletion
+  followed the link, unlinked the out-of-store projection record and rewrote the
+  out-of-store workspace unit. Both roots are now checked, for reads as well as
+  writes.
+- **A forced deletion combined with a backup failed and reported incompletely.**
+  The log generation was moved into the trash first, so mirroring the whole
+  session directory into the trash afterwards hit `ENOTEMPTY`; the bytes were in
+  the trash while the call reported a deferred cleanup. A directory already
+  emptied by the forced pass is now removed rather than mirrored again, and the
+  outcome is observed instead of assumed.
+- **Re-applying past deletions only removed the last id.** Each pass edited the
+  original workspace unit again, so the file kept every id but one while the
+  report said all of them were repaired. Each pass now sees the previous pass's
+  result, and the file is re-read afterwards to confirm what actually happened.
+- **`/session-admin/present` called a method that did not exist**, so it returned
+  an internal error. Restored and covered.
+
+Two tests were also strengthened because they promised more than they checked:
+the symlink case inspected without deleting (and accepted any error), and the
+dialog test named `loading → ready → deleted` never pressed the delete control.
+Both now run the operation they describe.
+
 Two known limits are documented rather than papered over: the running harness can
 restore a deleted id into `workspace.json` from its in-memory copy (mitigated by
 `repair`, which runs at startup and before every deletion), and the CLI cannot ask

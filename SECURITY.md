@@ -81,14 +81,23 @@ deleted files outside the store. A second, subtler version followed a symlinked
 3. A store root that is itself a symlink is refused outright
    (`SESSION_ADMIN_STORAGE_SHAPE`): without that check every later canonical
    comparison would simply agree with the link target and look well contained.
+   Both roots are checked — `sessions` decides where logs live and `storages`
+   decides where the projection records and the workspace unit live, so a link
+   under either one redirects a deletion.
 4. `workspace.json` must be a regular file. Rewriting through a link would
    replace the link with a file while the real unit kept the deleted id.
 
 **Covered by.** `test/engine.test.js` → *does not follow a symlinked sessions
-root*, *does not follow a symlinked project directory*, *does not unlink a
-projection record through a symlinked storages root*, *refuses to rewrite a
-workspace unit that is a symlink*, *ignores a symlinked session directory
-instead of following it*.
+root*, *does not follow a symlinked project directory*, *refuses a store whose
+storages root is a symlink, and touches nothing outside* (which asserts the
+refusal code and that the out-of-store projection record, archive list and
+workspace membership all survive), *refuses to rewrite a workspace unit that is
+a symlink*, *ignores a symlinked session directory instead of following it*.
+
+An earlier version of this file also covered the projection record with a test
+that only inspected, accepted any error, and never ran a deletion. It was
+replaced by the assertion above, which runs the deletion and checks the
+out-of-store file.
 
 ### 3.3 Deleting a session a live agent still owns
 

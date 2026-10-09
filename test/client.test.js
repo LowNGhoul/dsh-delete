@@ -94,6 +94,30 @@ const ReactStub = (() => {
 })();
 
 /**
+ * Find one button by the text it renders.
+ *
+ * @param {unknown} element - a rendered element tree.
+ * @param {RegExp} pattern - the label to match.
+ * @returns {{ props: Record<string, unknown> }|null} the button's props, or null.
+ */
+function findButton(element, pattern) {
+  /** @type {{ props: Record<string, unknown> }|null} */
+  let found = null;
+  const walk = (node) => {
+    if (found !== null || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (!('type' in node) || !('props' in node)) return;
+    if (node.type === 'button' && pattern.test(collectText(node).join(' '))) found = { props: node.props };
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(element);
+  return found;
+}
+
+/**
  * Every display string in a rendered element tree.
  *
  * Reads a component's own `line` prop as well as its children, because the
@@ -287,13 +311,13 @@ describe('client bundle', () => {
     delete globalThis.fetch;
   });
 
-  it('walks loading → ready → deleted through the real transport contract', async () => {
-    /** @type {{ method: string, payload: unknown }[]} */
+  it('walks loading → confirm → deleted, issuing the delete it names', async () => {
+    /** @type {{ method: string, payload: unknown, endpoint: string }[]} */
     const calls = [];
     globalThis.fetch = async (endpoint, init) => {
       const body = JSON.parse(init.body);
       calls.push({ method: body.method, payload: body.payload, endpoint });
-      if (body.method.endsWith('/inspect')) {
+      if (body.method === 'inspect') {
         return {
           ok: true,
           json: async () => ({
@@ -318,6 +342,7 @@ describe('client bundle', () => {
             ok: true,
             value: {
               queued: false,
+              forced: true,
               sessionId: 'session-x-0001',
               report: { sessionId: 'session-x-0001', removedCount: 3, bytesRemoved: 2048 },
               lines: ['Permanently deleted "Doomed".'],
@@ -327,18 +352,32 @@ describe('client bundle', () => {
       };
     };
 
+    // Phase 1: mounting issues the inspection.
     ReactStub.__clear();
+    ReactStub.__reset();
     plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
-    // The first effect issues the inspection.
-    const effects = ReactStub.__effects();
-    for (const effect of effects) effect();
+    for (const effect of ReactStub.__effects()) effect();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].endpoint, '/session-admin/inspect');
+    assert.deepEqual(calls.map((entry) => entry.endpoint), ['/session-admin/inspect']);
     assert.deepEqual(calls[0].payload, { sessionId: 'session-x-0001' });
     // The URL carries the channel; the envelope's method is the bare endpoint
     // the carrier derives by stripping it.
     assert.equal(calls[0].method, 'inspect');
+
+    // Phase 2: the operator presses the destructive control. Nothing else in
+    // this file proves the button is wired to a request, which is the one thing
+    // the name of this test promises.
+    ReactStub.__reset();
+    const settled = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {} });
+    const confirm = findButton(settled, /delete permanently/i);
+    assert.ok(confirm !== null, 'the confirm control must be rendered once the inspection answered');
+    assert.equal(confirm.props.disabled, false, 'it must be pressable once the inspection answered');
+    await confirm.props.onClick();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(calls.map((entry) => entry.endpoint), ['/session-admin/inspect', '/session-admin/delete']);
+    assert.deepEqual(calls[1].payload, { sessionId: 'session-x-0001', force: true }, 'the press must ask for the deletion itself');
+    assert.equal(calls[1].method, 'delete');
     delete globalThis.fetch;
   });
 
