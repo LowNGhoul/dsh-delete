@@ -7,6 +7,15 @@ every byte on disk. This plugin removes the session instead: the append-only log
 its projection checkpoint, its membership in the workspace registry, and its
 entry in the archive list. There is no undo.
 
+## Requirements
+
+Node 22.19 or newer (the engine uses the built-in Zstandard API and
+`node --test`), and a dsh installation whose `sessions`/`storages` layout matches
+the shipped `@deepseek-ai/dsh-session-persistence-jsonl` and `dsh-workspace`
+packages. There are no runtime dependencies to install: the host half imports
+only Node built-ins, and the browser half requires only the React the page
+already loads.
+
 ## Install
 
 ```sh

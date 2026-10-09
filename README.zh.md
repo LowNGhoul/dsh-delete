@@ -5,6 +5,13 @@
 dsh 自带的「归档」只是把会话从侧边栏藏起来，磁盘上的东西一个字节都没少。这个插件做的是
 另一件事：删掉会话的追加式日志、投影缓存、工作区登记和归档标记。删完就没了，不能恢复。
 
+## 环境要求
+
+Node 22.19 及以上（引擎用到内置的 Zstandard API 和 `node --test`），以及一份
+`sessions`/`storages` 布局与 `@deepseek-ai/dsh-session-persistence-jsonl`、
+`dsh-workspace` 一致的 dsh 安装。没有需要安装的运行时依赖：宿主一半只 import Node 内置
+模块，浏览器一半只 require 页面本来就加载好的 React。
+
 ## 安装
 
 ```sh
