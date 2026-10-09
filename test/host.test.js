@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib';
 import { RPC_CHANNEL, RPC_DELETE, RPC_INSPECT, RPC_PENDING, RPC_STORE } from '../lib/constants.js';
 import { encodeSegment, projectKey } from '../lib/engine.js';
 import { Config, SessionAdmin, apply, inject, name } from '../lib/index.js';
+import { describeInspection } from '../lib/report.js';
 
 /** Plugin config a deployment would resolve: the schema defaults. */
 const BASE_CONFIG = Object.fromEntries(Object.entries(Config).map(([key, field]) => [key, field.default]));
@@ -546,5 +547,27 @@ describe('command surface', () => {
     });
     apply(ctx, { ...BASE_CONFIG, dshHome: home, enableRpc: false });
     assert.equal(handled, 0);
+  });
+});
+
+describe('search index disclosure', () => {
+  it('reads the query index path from the service and ignores an in-memory index', async () => {
+    const { home, id } = await makeStore();
+    const inMemory = new SessionAdmin(
+      new FakeContext({ ...services(), sessionQuery: { config: { path: ':memory:' } } }),
+      { ...BASE_CONFIG, dshHome: home },
+    );
+    assert.equal(inMemory.searchIndexPath(), null);
+    const onDisk = new SessionAdmin(
+      new FakeContext({ ...services(), sessionQuery: { config: { path: '/var/lib/dsh/q.sqlite' } } }),
+      { ...BASE_CONFIG, dshHome: home },
+    );
+    assert.equal(onDisk.searchIndexPath(), '/var/lib/dsh/q.sqlite');
+    const inspection = await onDisk.inspect(id);
+    assert.equal(inspection.searchIndex, '/var/lib/dsh/q.sqlite');
+    assert.ok(describeInspection(inspection).some((line) => line.includes('/var/lib/dsh/q.sqlite')));
+    // No service at all is not an error.
+    const absent = new SessionAdmin(new FakeContext(services()), { ...BASE_CONFIG, dshHome: home });
+    assert.equal(absent.searchIndexPath(), null);
   });
 });

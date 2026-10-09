@@ -207,7 +207,7 @@ of durable per-session state the shipped dsh writes, and what happens to each:
 | `attachments/v1/**` | **no, by design** | content-addressed and shared across sessions; the report says how many the session referenced |
 | `llm-deepseek/files-v3.json` | **not needed** | keyed by a route/variant scope hash, not by session id, so nothing points at the deleted session |
 | `spill-local` spit files | **no** | a private per-process directory under the OS temp dir, with its own 30-day startup cleanup; scratch output, not session state |
-| `storages/session_query` (SQLite index) | **not needed when in-memory** | the shipped Web profile opens it at `:memory:`. A deployment that sets a real `path` or `openAt` would gain a per-session index this engine does not yet clear — check `session-query-sqlite` config before enabling in-memory search |
+| `storages/session_query` (SQLite index) | **only when in-memory** | the shipped Web profile opens it at `:memory:` and drops it on exit. A deployment that points `path` at a file keeps a second copy of every session's text; the deletion report names that file, and a restart or reindex is what clears it. This engine never writes that database, because corrupting a shared index is worse than a stale row |
 | `session-admin/deletions.jsonl` (this tool's ledger) | **no, by design** | it records the session id you deleted and nothing about its content; delete the file if the id itself is sensitive |
 | `session-admin/trash/**` (only with `backup: true`) | **no, by design** | the point of the option; remove it when satisfied |
 

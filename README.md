@@ -105,7 +105,7 @@ through each threat and names the control and the test that covers it.
 npm test
 ```
 
-43 tests build their own store under a temporary directory. They cover the
+52 tests build their own store under a temporary directory. They cover the
 deletion itself, the refusals (live sessions, unknown ids, hostile payloads,
 symlinked directories, prototype-polluting documents), the host plugin's policy,
 the wire contract, and the command surface. Nothing in the suite reads or writes

@@ -485,3 +485,28 @@ describe('hardening', () => {
     assert.equal(after.mode & 0o777, 0o600, 'a private storage file must stay private');
   });
 });
+
+describe('search index disclosure', () => {
+  it('names an on-disk search index so the operator is not misled', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'dsh-sa-index-'));
+    const layout = resolveLayout({ dshHome: home });
+    await mkdir(layout.projectionsDir, { recursive: true });
+    const projectDir = path.join(layout.sessionsRoot, projectKey('/tmp/index'));
+    const dir = path.join(projectDir, encodeSegment('session-index-0001'));
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'session.v3.jsonl'), '{"type":"session","version":3,"id":"session-index-0001","cwd":"/tmp/index"}\n');
+
+    const withoutIndex = await inspectSession({ id: 'session-index-0001', dshHome: home, live: false });
+    assert.equal(withoutIndex.searchIndex, null);
+    assert.equal(describeInspection(withoutIndex).some((line) => /search index/.test(line)), false);
+
+    const withIndex = await inspectSession({
+      id: 'session-index-0001',
+      dshHome: home,
+      live: false,
+      searchIndex: '/var/lib/dsh/session-query.sqlite',
+    });
+    assert.equal(withIndex.searchIndex, '/var/lib/dsh/session-query.sqlite');
+    assert.ok(describeInspection(withIndex).some((line) => line.includes('/var/lib/dsh/session-query.sqlite')));
+  });
+});
