@@ -7,6 +7,10 @@ every byte on disk. This plugin removes the session instead: the append-only log
 its projection checkpoint, its membership in the workspace registry, and its
 entry in the archive list. There is no undo.
 
+## Compatibility
+
+The current version is built for DSH `0.1.5-rc.1` and is **not compatible with the latest DSH releases**. It has not been updated for newer versions; install and run it only against a DSH `0.1.5-rc.1` host whose `sessions`/`storages` layout matches the packages listed below.
+
 ## Requirements
 
 Node 22.19 or newer (the engine uses the built-in Zstandard API and
