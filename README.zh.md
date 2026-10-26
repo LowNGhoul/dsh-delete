@@ -3,14 +3,20 @@
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）里的会话彻底删掉。
 
 dsh 自带的「归档」只是把会话从侧边栏藏起来，磁盘上的东西一个字节都没少。这个插件做的是
-另一件事：删掉会话的追加式日志、投影缓存、工作区登记和归档标记。删完就没了，不能恢复。
+另一件事：删掉会话的追加式日志、投影缓存、工作区登记、归档/置顶标记，以及绑定到它的
+定时任务。删完就没了，不能恢复。
+
+## 兼容性
+
+当前版本面向 DSH `0.2.1-rc.3` 及后续 `0.2.x`，会清理这些版本新增的
+`pinnedSessionIds` 和 `schedule` 存储单元。它不面向 DSH `0.1.x`。
 
 ## 环境要求
 
 Node 22.19 及以上（引擎用到内置的 Zstandard API 和 `node --test`），以及一份
 `sessions`/`storages` 布局与 `@deepseek-ai/dsh-session-persistence-jsonl`、
-`dsh-workspace` 一致的 dsh 安装。没有需要安装的运行时依赖：宿主一半只 import Node 内置
-模块，浏览器一半只 require 页面本来就加载好的 React。
+`dsh-workspace`、`dsh-schedule` 一致的 dsh 安装。没有需要安装的运行时依赖：宿主一半只
+import Node 内置模块，浏览器一半只 require 页面本来就加载好的 React。
 
 ## 安装
 
@@ -27,6 +33,16 @@ dsh plugin --profile web add /绝对路径/dsh-session-admin
 ```
 
 装完重启该 profile。这条命令会把包加进 profile 的 bundle 列表，插件的组合补丁靠它生效。
+
+桌面版 DeepSeek Harness 用的是保留的 **`desktop`** profile，不是 `web`。`dsh` 通常不在
+`PATH` 上，直接用 App 自带的 CLI：
+
+```sh
+"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
+  plugin --profile desktop add /绝对路径/dsh-session-admin
+```
+
+如果 `dsh` 已经在 `PATH` 上，`./install.sh desktop` 效果一样。
 
 ## 怎么用
 
@@ -60,6 +76,12 @@ npx dsh-session-admin delete <session-id> --yes
 | 投影缓存（侧边栏标题、统计、待办） | `$DSH_HOME/storages/session_projcache/sessions/<id>.json` |
 | 工作区登记 | `$DSH_HOME/storages/workspace.json` → `tables.workspaces[*].sessionIds` |
 | 归档标记 | `$DSH_HOME/storages/workspace.json` → `global.archivedSessionIds` |
+| 置顶标记 | `$DSH_HOME/storages/workspace.json` → `global.pinnedSessionIds` |
+| 绑定到会话的定时任务 | `$DSH_HOME/storages/schedule.json` → `tables.tasks` |
+
+宿主插件通过运行中的 `workspaceRegistry` 和 `schedule` 服务清理这些状态，避免运行中的
+dsh 在下一次无关写入时把它们恢复；离线 CLI 直接改同样的存储单元，中断的删除由启动时的
+台账修复收敛。
 
 有两样东西是故意不动的：
 
@@ -98,17 +120,18 @@ npx dsh-session-admin delete <session-id> --yes
 ```sh
 dsh-session-admin settle             # 把排队中/中断的删除一次做完
 dsh-session-admin recover            # 列出没做完的删除
-dsh-session-admin repair             # 把历史删除重新应用到 workspace.json
+dsh-session-admin repair             # 把历史删除重新应用到 workspace.json / schedule.json
 ```
 
 `repair` 的存在是因为运行中的 dsh 把工作区注册表缓存在内存里，下一次无关的写入可能把已删
-的 id 又写回文件。插件在启动时和每次删除前都会跑一遍修复，让文件和事实保持一致。
+的 id 又写回文件。宿主插件现在通过 `workspaceRegistry` 和 `schedule` 服务做清理，离线 CLI
+则由启动时的台账修复收敛。
 
 引擎遇到软链接的存储条目会拒绝而不是跟进去（包括软链接的项目目录和软链接的 `sessions`
 根目录），路径包含关系按真实路径判断而不是字符串，每个会话 id 在变成路径之前都要过一遍
-严格的字符白名单，重写 `workspace.json` 用原子替换并保留原文件权限。每个威胁对应的防护
-措施和测试在 `SECURITY.md` 里逐条列出，其中也写明了删除有意不覆盖的两样东西：共享的附件
-字节，以及分叉子会话里复制过去的内容。
+严格的字符白名单，重写 `workspace.json` 和 `schedule.json` 用原子替换并保留原文件权限。
+每个威胁对应的防护措施和测试在 `SECURITY.md` 里逐条列出，其中也写明了删除有意不覆盖的
+两样东西：共享的附件字节，以及分叉子会话里复制过去的内容。
 
 ## 测试
 
@@ -116,12 +139,12 @@ dsh-session-admin repair             # 把历史删除重新应用到 workspace.
 npm test
 ```
 
-85 个测试各自在临时目录里搭一套存储。覆盖删除本身，以及各种「不能误报成功」和「不能删错」
+103 个测试各自在临时目录里搭一套存储。覆盖删除本身，以及各种「不能误报成功」和「不能删错」
 的路径：v0 日志、被手工改名的项目目录、只剩元数据、日志身份不符；活跃会话、不存在的 id、
-恶意请求体、软链接目录与软链接根、带原型污染键的存储文档；还有工作区修复循环、宿主插件
-策略、通信契约、浏览器端组件和命令注册。`real Cordis runtime` 一组会加载 dsh 自带的真实
-`@deepseek-ai/cordis`，把插件放进真实 fiber 树里跑；没有 dsh 时自动跳过。测试不会读写真实
-的 `$DSH_HOME`。
+恶意请求体、软链接目录与软链接根、带原型污染键的存储文档；还有工作区与定时任务的修复
+循环、宿主插件策略、通信契约、浏览器端组件和命令注册。`real Cordis runtime` 一组会加载
+dsh 自带的真实 `@deepseek-ai/cordis`，把插件放进真实 fiber 树里跑；没有 dsh 时自动跳过。
+测试不会读写真实的 `$DSH_HOME`。
 
 ## 许可
 

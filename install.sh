@@ -8,6 +8,7 @@
 #
 # Usage:
 #   ./install.sh                 # install into the "web" profile from this checkout
+#   ./install.sh desktop         # install into the DSH Desktop profile
 #   ./install.sh tui             # install into another profile
 #   ./install.sh web --uninstall # remove it again
 #
@@ -20,27 +21,34 @@ ACTION="${2:-}"
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
+DESKTOP_DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 
-if ! command -v dsh >/dev/null 2>&1; then
-  echo "install.sh: 'dsh' is not on PATH" >&2
+if command -v dsh >/dev/null 2>&1; then
+  DSH="$(command -v dsh)"
+elif [ -x "$DESKTOP_DSH" ]; then
+  # The Desktop application ships its own CLI but does not put it on PATH.
+  DSH="$DESKTOP_DSH"
+else
+  echo "install.sh: no 'dsh' on PATH and no DeepSeek Harness Desktop CLI found" >&2
   exit 1
 fi
 
 if [ ! -d "$PROFILE_DIR" ]; then
   echo "install.sh: no profile at $PROFILE_DIR" >&2
-  echo "           start it once (for example 'dsh web') so the profile is created" >&2
+  echo "           start it once (for example 'dsh web', or open the Desktop app) so the profile is created" >&2
   exit 1
 fi
 
 if [ "$ACTION" = "--uninstall" ]; then
   echo "==> removing dsh-session-admin from the '$PROFILE' profile"
-  dsh plugin --profile "$PROFILE" remove dsh-session-admin
+  "$DSH" plugin --profile "$PROFILE" remove dsh-session-admin
   echo "==> done; restart the '$PROFILE' profile"
   exit 0
 fi
 
 echo "==> plugin source: $SOURCE"
 echo "==> profile:       $PROFILE_DIR"
+echo "==> dsh:           $DSH"
 
 echo "==> 1/3 running the plugin's own tests"
 ( cd "$SOURCE" && node --test 'test/*.test.js' >/dev/null )
@@ -50,7 +58,7 @@ echo "==> 2/3 showing what a deletion would do (read-only preview)"
 node "$SOURCE/lib/cli.js" store
 
 echo "==> 3/3 installing into the profile"
-dsh plugin --profile "$PROFILE" add "$SOURCE"
+"$DSH" plugin --profile "$PROFILE" add "$SOURCE"
 
 cat <<EOF
 
@@ -70,6 +78,6 @@ The standalone CLI also works without dsh running:
   node $SOURCE/lib/cli.js list
   node $SOURCE/lib/cli.js inspect <session-id>
   node $SOURCE/lib/cli.js delete <session-id> --yes
-  node $SOURCE/lib/cli.js repair        # re-apply past deletions to workspace.json
+  node $SOURCE/lib/cli.js repair        # re-apply past deletions to workspace.json / schedule.json
   node $SOURCE/lib/cli.js recover       # list unfinished deletions
 EOF

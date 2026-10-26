@@ -4,21 +4,24 @@ Permanently delete a conversation from [DeepSeek Harness](https://github.com/dee
 
 dsh ships an archive action, which hides a session from the sidebar and leaves
 every byte on disk. This plugin removes the session instead: the append-only log,
-its projection checkpoint, its membership in the workspace registry, and its
-entry in the archive list. There is no undo.
+its projection checkpoint, its membership in the workspace registry, its archive
+and pinned entries, and any scheduled task bound to it. There is no undo.
 
 ## Compatibility
 
-The current version is built for DSH `0.1.5-rc.1` and is **not compatible with the latest DSH releases**. It has not been updated for newer versions; install and run it only against a DSH `0.1.5-rc.1` host whose `sessions`/`storages` layout matches the packages listed below.
+The current version targets DSH `0.2.1-rc.3` and later `0.2.x` releases. It
+removes the store artifacts those versions write, including the workspace
+`pinnedSessionIds` list and the `schedule` storage unit. It is not intended for
+DSH `0.1.x`; use the previous release there.
 
 ## Requirements
 
 Node 22.19 or newer (the engine uses the built-in Zstandard API and
 `node --test`), and a dsh installation whose `sessions`/`storages` layout matches
-the shipped `@deepseek-ai/dsh-session-persistence-jsonl` and `dsh-workspace`
-packages. There are no runtime dependencies to install: the host half imports
-only Node built-ins, and the browser half requires only the React the page
-already loads.
+the shipped `@deepseek-ai/dsh-session-persistence-jsonl`, `dsh-workspace`, and
+`dsh-schedule` packages. There are no runtime dependencies to install: the host
+half imports only Node built-ins, and the browser half requires only the React
+the page already loads.
 
 ## Install
 
@@ -41,6 +44,17 @@ bundle list, which is what loads the plugin's composition patch.
 From a checkout there is also `./install.sh`, which runs the test suite, prints
 what the store currently holds, and then performs the same install.
 `./install.sh web --uninstall` reverses it.
+
+The DeepSeek Harness Desktop application uses the reserved **`desktop`** profile,
+not `web`. Point the bundled CLI at that profile (the `dsh` launcher is not
+normally on `PATH`):
+
+```sh
+"/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
+  plugin --profile desktop add /absolute/path/to/dsh-session-admin
+```
+
+`./install.sh desktop` does the same when `dsh` is on `PATH`.
 
 The CLI works without any installation:
 
@@ -84,6 +98,13 @@ the sidebar, so a real deletion covers all of these:
 | Projection checkpoint (sidebar title, stats, todos) | `$DSH_HOME/storages/session_projcache/sessions/<id>.json` |
 | Workspace membership | `$DSH_HOME/storages/workspace.json` → `tables.workspaces[*].sessionIds` |
 | Archive flag | `$DSH_HOME/storages/workspace.json` → `global.archivedSessionIds` |
+| Pinned flag | `$DSH_HOME/storages/workspace.json` → `global.pinnedSessionIds` |
+| Scheduled tasks bound to the session | `$DSH_HOME/storages/schedule.json` → `tables.tasks` |
+
+The host plugin removes workspace state through the live `workspaceRegistry`
+and scheduled tasks through the live `schedule` service, so a running dsh cannot
+restore them on its next unrelated write. The offline CLI edits the same units
+directly; an interrupted CLI deletion is converged by the startup ledger repair.
 
 Two things are deliberately kept:
 
@@ -156,14 +177,14 @@ child session.
 npm test
 ```
 
-85 tests build their own store under a temporary directory. They cover the
+103 tests build their own store under a temporary directory. They cover the
 deletion itself, the false-positive guards (generation-zero logs, hand-renamed
 project directories, orphan metadata, mismatched identities), the refusals (live
 sessions, unknown ids, hostile payloads, symlinked directories and roots,
-prototype-polluting documents), the workspace repair cycle, the host plugin's
-policy, the RPC channel over a real HTTP server, the browser bundle's
-registration into a slot registry that parks and resumes declarations, its
-rendered confirmation states, and the command surface. The
+prototype-polluting documents), the workspace and schedule repair cycles, the
+host plugin's policy, the RPC channel over a real HTTP server, the browser
+bundle's registration into a slot registry that parks and resumes declarations,
+its rendered confirmation states, and the command surface. The
 `real Cordis runtime` suite loads the actual `@deepseek-ai/cordis` that a dsh
 installation ships and puts the plugin through a real fiber tree; it skips itself
 where no dsh installation is present. Nothing in the suite reads or writes a real

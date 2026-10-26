@@ -14,14 +14,16 @@ exists to keep that sentence true.
 ## 1. What the capability is
 
 `dsh-session-admin` permanently removes one stored DeepSeek Harness session: its
-append-only log, its projection checkpoint, its workspace membership, and its
-archive flag. It reaches those through three Cordis services the host
-composition already provides (`sessions`, `sessionPersistence`,
-`storageDomain`) plus the storage files themselves.
+append-only log, its projection checkpoint, its workspace membership, its archive
+and pinned flags, and any scheduled task bound to it. It reaches those through
+the Cordis services the host composition already provides (`sessions`,
+`sessionPersistence`, `storageDomain`, and, when present, `workspaceRegistry` and
+`schedule`) plus the storage files themselves.
 
 It performs no network I/O, spawns no process, executes no shell, and opens no
 listening socket. Its complete capability is: *read and write files under
-`$DSH_HOME`, and remove a single session's entries from the workspace registry.*
+`$DSH_HOME`, and remove a single session's entries from the workspace registry
+and the schedule unit.*
 
 ## 2. Assets and the blast radius
 
@@ -29,7 +31,8 @@ listening socket. Its complete capability is: *read and write files under
 | --- | --- | --- | --- |
 | `<home>/sessions/**/session.v*.jsonl[.zstd]` | header only | — | one session's own directory |
 | `<home>/storages/session_projcache/sessions/<id>.json` | title only | — | the same session's checkpoint |
-| `<home>/storages/workspace.json` | full unit | full unit, atomically, mode-preserving | one id, from two lists |
+| `<home>/storages/workspace.json` | full unit | full unit, atomically, mode-preserving | one id, from three lists |
+| `<home>/storages/schedule.json` | full unit | full unit, atomically, mode-preserving | tasks bound to one session |
 | `<home>/attachments/**` | **never** | **never** | **never** |
 | Everything else | **never** | **never** | **never** |
 
@@ -84,8 +87,9 @@ deleted files outside the store. A second, subtler version followed a symlinked
    Both roots are checked — `sessions` decides where logs live and `storages`
    decides where the projection records and the workspace unit live, so a link
    under either one redirects a deletion.
-4. `workspace.json` must be a regular file. Rewriting through a link would
-   replace the link with a file while the real unit kept the deleted id.
+4. `workspace.json` and `schedule.json` must be regular files. Rewriting through
+   a link would replace the link with a file while the real unit kept the
+   deleted id or task.
 
 **Covered by.** `test/engine.test.js` → *does not follow a symlinked sessions
 root*, *does not follow a symlinked project directory*, *refuses a store whose
@@ -193,9 +197,11 @@ storage unit.
 - A project directory is removed only after a fresh read shows it empty, and
   with `rmdir` rather than a recursive remove, so a non-empty directory cannot
   be removed even under a race.
-- `workspace.json` is rewritten by replacing exactly one id in exactly two
+- `workspace.json` is rewritten by replacing exactly one id in exactly three
   lists; every other table, key and field is copied through untouched.
-- The workspace rewrite is atomic (`write` → `fsync` → `rename`) and preserves
+- `schedule.json` is rewritten by removing only task rows whose `sessionId` is
+  the deleted session; every other task and field is copied through untouched.
+- Both storage rewrites are atomic (`write` → `fsync` → `rename`) and preserve
   the file's mode, so a crash leaves the previous complete document and a
   private file does not become world-readable.
 
@@ -271,7 +277,7 @@ reported as `SESSION_ADMIN_ABORTED` rather than as an internal failure.
 
 A privacy tool is only as good as its inventory, so this is the full accounting
 of durable per-session state the shipped dsh writes, and what happens to each.
-Two rows are honest gaps rather than features.
+Several rows are honest gaps rather than features.
 
 | Durable state | Removed? | Notes |
 | --- | --- | --- |
@@ -280,7 +286,8 @@ Two rows are honest gaps rather than features.
 | `<id>/session.migration.<hex>.jsonl[.zstd].tmp`, `<id>/session.vN.jsonl.<hex>.tmp` | yes | inside the same directory |
 | A session directory under a project directory with any name | yes | the persistence backend accepts an arbitrary project directory name and a person may rename one, so project directories are recognized by being real directories directly under the canonical root rather than by a `--*--` name |
 | `storages/session_projcache/sessions/<id>.json` and `<id>.json.bak.<stamp>` | yes | exact name plus the domain layer's own bad-record sidecar |
-| `storages/workspace.json` membership and archive flag | yes, and re-applied | the running harness holds this unit in memory and can restore an id from it on its next unrelated write. Every deletion is recorded in the ledger, and `repair` (run at startup, before each deletion, and callable directly) puts the file back in agreement. A test covers the restore-then-repair cycle |
+| `storages/workspace.json` membership, archive flag and pinned flag | yes, and re-applied | the running harness holds this unit in memory and can restore an id from it on its next unrelated write. The host updates it through `workspaceRegistry`; the CLI edits the file directly, every deletion is recorded in the ledger, and `repair` (run at startup, before each deletion, and callable directly) puts the file back in agreement. A test covers the restore-then-repair cycle |
+| `storages/schedule.json` tasks bound to the session | yes, and re-applied | the host stops them through the live `schedule` service; the CLI edits the unit directly. The ledger repair sweeps task rows left by an interrupted deletion. An inactive row is removed too, because it still names the deleted session |
 | `attachments/v1/**` | **no, by design** | content-addressed and shared across sessions; there is no manifest mapping an attachment to a session, so the bytes cannot be attributed to the one being deleted. The report says how many the session referenced |
 | Child and forked sessions whose `parentSession` names the deleted id | **no** | a fork seeds its child with a *copy* of the parent's events (`dsh-session` `options.seed`), so a child holds its own copy of that content and deleting the parent does not remove it. The report counts children it finds and says so rather than implying they went too |
 | Browser `localStorage`: `dsh.conversation.<sessionId>` (unsent draft), `dsh.sessions.current`, and the workspace view's id arrays | **no** | the host cannot reach a browser's storage. A draft in a deleted conversation's composer survives in that browser until the page's own storage is cleared |
@@ -325,8 +332,9 @@ A deletion also refuses rather than guesses at two states it cannot resolve:
 | A compromised browser session cookie | The cookie is the harness's own authentication; a stolen cookie can already drive every other host RPC, including session creation and prompts. Deletion adds no new class of authority. |
 | A store the user deliberately symlinked | Refused, including the case where the whole `sessions` root is a link to another volume. The refusal is loud (`SESSION_ADMIN_STORAGE_SHAPE`) rather than silent, so a legitimate setup that needs it can be discussed rather than discovered. |
 | `backup: false` (the default) | Bytes are gone at the filesystem level. Recovery depends on the platform's own snapshots. Turn `backup: true` on if that is not acceptable. |
-| Store format drift | The engine recognizes unit version 2 of `workspace` and the `session_projcache` layout; a different version, a non-object `tables`, or a non-regular file is refused with `SESSION_ADMIN_STORAGE_SHAPE` rather than guessed at. A future dsh version that changes these shapes must be checked before upgrading — the plugin fails closed rather than half-deleting. |
-| The workspace unit's in-memory copy | A running dsh can restore a deleted id from the workspace domain's memory on its next unrelated write. `repair` re-applies the ledger to fix it, and it runs at startup and before every deletion; a page that never triggers a repair and never restarts could still show a ghost until it does. |
+| Store format drift | The engine recognizes unit version 2 of `workspace`, unit version 1 of `schedule`, and the `session_projcache` layout; a different version, a non-object `tables`, or a non-regular file is refused with `SESSION_ADMIN_STORAGE_SHAPE` rather than guessed at. A future dsh version that changes these shapes must be checked before upgrading — the plugin fails closed rather than half-deleting. |
+| The workspace unit's in-memory copy | A running dsh can restore a deleted id from the workspace domain's memory on its next unrelated write. The host now calls `workspaceRegistry.detachSession` / `unpinSession` / `unarchiveSession`, so the live state and the file agree; the CLI's file-level `repair` still re-applies the ledger for offline deletions. |
+| The schedule unit's in-memory copy | The host removes tasks through the live `schedule` service, so its in-memory domain cannot resurrect them. A CLI deletion while a dsh process is running can race that service; stop dsh before using the offline CLI on a store with scheduled reminders, or run the host deletion instead. |
 | Deleting a session a *different* process has open | The CLI runs outside any dsh process and cannot ask a server whether a session is live. Its `--yes` output says so. The on-disk `session.lock` is not consulted; doing it properly means taking the same lease the persistence backend takes, which is a change worth making deliberately rather than in passing. |
 | Encoding drift | `encodeSegment` / `projectKey` are re-implementations, pinned by tests against the real directory names. A drift would make a deletion find nothing (fail closed), never delete the wrong thing. |
 

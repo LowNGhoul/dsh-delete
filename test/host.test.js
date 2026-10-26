@@ -165,11 +165,11 @@ function services(liveIds = []) {
 /**
  * Build a service with no transports attached.
  *
- * @param {{ home: string, live?: string[] }} options - store and liveness.
+ * @param {{ home: string, live?: string[], extra?: Record<string, unknown> }} options - store, liveness, and optional services.
  * @returns {SessionAdmin} the service.
  */
-function makeAdmin({ home, live = [] }) {
-  return new SessionAdmin(new FakeContext(services(live)), { ...BASE_CONFIG, dshHome: home });
+function makeAdmin({ home, live = [], extra = {} }) {
+  return new SessionAdmin(new FakeContext({ ...services(live), ...extra }), { ...BASE_CONFIG, dshHome: home });
 }
 
 describe('plugin shape', () => {
@@ -305,6 +305,63 @@ describe('service policy', () => {
     assert.equal(outcome.reason, 'deleted');
     assert.equal(admin.listQueued().length, 0);
     await assert.rejects(() => admin.inspect(id), (error) => error.code === 'SESSION_ADMIN_NOT_FOUND');
+  });
+
+  it('uses the live workspace and schedule services instead of rewriting their files', async () => {
+    const { home, id } = await makeStore();
+    const workspaceFile = path.join(home, 'storages', 'workspace.json');
+    const scheduleFile = path.join(home, 'storages', 'schedule.json');
+    await writeFile(workspaceFile, `${JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: {
+        initialized: true,
+        workspaceIds: ['ws-1'],
+        archivedSessionIds: [id],
+        pinnedSessionIds: [id],
+      },
+      tables: {
+        workspaces: {
+          'ws-1': { path: '/tmp/host-project', title: 'host-project', sessionIds: [id] },
+        },
+      },
+    }, null, 2)}\n`);
+    await writeFile(scheduleFile, `${JSON.stringify({
+      unit: { name: 'schedule', version: 1 },
+      tables: {
+        tasks: {
+          'task-bound': { sessionId: id, record: { id: 'task-bound', kind: 'after' }, status: 'active' },
+          'task-other': { sessionId: 'session-other-0001', record: { id: 'task-other', kind: 'after' }, status: 'active' },
+        },
+      },
+    }, null, 2)}\n`);
+
+    const calls = [];
+    const deletedTasks = [];
+    const registry = {
+      detachSession: async (sessionId) => calls.push(['detach', sessionId]),
+      unpinSession: async (sessionId) => calls.push(['unpin', sessionId]),
+      unarchiveSession: async (sessionId) => calls.push(['unarchive', sessionId]),
+    };
+    const schedule = {
+      catalog: async () => [
+        { id: 'task-bound', sessionId: id },
+        { id: 'task-other', sessionId: 'session-other-0001' },
+      ],
+      delete: async ({ sessionId, id: taskId }) => {
+        deletedTasks.push([sessionId, taskId]);
+        return { id: taskId, deleted: true };
+      },
+    };
+    const admin = makeAdmin({ home, extra: { workspaceRegistry: registry, schedule } });
+    const report = await admin.delete(id);
+
+    assert.deepEqual(calls, [['detach', id], ['unpin', id], ['unarchive', id]]);
+    assert.deepEqual(deletedTasks, [[id, 'task-bound']]);
+    assert.equal(report.pinnedFlagPresent, true);
+    assert.equal(report.archivedFlagPresent, true);
+    assert.equal(report.scheduledTasksRemoved, 1);
+    assert.equal(await readFile(workspaceFile, 'utf8').then((text) => text.includes(id)), true);
+    assert.equal(await readFile(scheduleFile, 'utf8').then((text) => text.includes('task-bound')), true);
   });
 
   it('settles a queued deletion only after the session is released', async () => {

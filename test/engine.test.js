@@ -26,6 +26,7 @@ import {
   readDeletedIds,
   readProjectionTitle,
   readSessionHeader,
+  repairSchedule,
   repairWorkspace,
   resolveLayout,
   settleQueuedDeletions,
@@ -62,17 +63,18 @@ class Fixture {
   /**
    * Write one stored session.
    *
-   * @param {{ id: string, cwd?: string, title?: string|null, frames?: number, archived?: boolean, workspaceId?: string, raw?: boolean, bytes?: number }} spec - session specification.
+   * @param {{ id: string, cwd?: string, title?: string|null, frames?: number, archived?: boolean, pinned?: boolean, workspaceId?: string, raw?: boolean, bytes?: number, formatVersion?: number }} spec - session specification.
    * @returns {Promise<{ id: string, dir: string, log: string, projection: string }>} created paths.
    */
   async addSession(spec) {
     const cwd = spec.cwd ?? '/tmp/example-project';
+    const formatVersion = spec.formatVersion ?? 3;
     const projectDir = path.join(this.layout.sessionsRoot, projectKey(cwd));
     const dir = path.join(projectDir, encodeSegment(spec.id));
     await mkdir(dir, { recursive: true });
     const header = JSON.stringify({
       type: 'session',
-      version: 3,
+      version: formatVersion,
       id: spec.id,
       createdAt: 1_700_000_000_000,
       cwd,
@@ -88,7 +90,7 @@ class Fixture {
       for (const row of filler) frames.push(zstdCompressSync(Buffer.from(`${row}\n`, 'utf8')));
       body = Buffer.concat(frames);
     }
-    const log = path.join(dir, spec.raw === true ? 'session.v3.jsonl' : 'session.v3.jsonl.zstd');
+    const log = path.join(dir, spec.raw === true ? `session.v${formatVersion}.jsonl` : `session.v${formatVersion}.jsonl.zstd`);
     await writeFile(log, body);
 
     const projection = path.join(this.layout.projectionsDir, `${spec.id}.json`);
@@ -97,7 +99,7 @@ class Fixture {
       `${JSON.stringify({
         version: 7,
         record: {
-          identity: { formatVersion: 3, createdAt: 1_700_000_000_000, cwd, isSeeded: false, inheritedEventCount: 0 },
+          identity: { formatVersion, createdAt: 1_700_000_000_000, cwd, isSeeded: false, inheritedEventCount: 0 },
           rows: { title: { ver: 1, seq: 1, val: spec.title ?? null } },
         },
       }, null, 2)}\n`,
@@ -115,6 +117,7 @@ class Fixture {
         },
       },
       archived: spec.archived === true ? await this.archivedIds(spec.id) : await this.archivedIds(),
+      pinned: spec.pinned === true ? await this.pinnedIds(spec.id) : await this.pinnedIds(),
     });
 
     return { id: spec.id, dir, log, projection };
@@ -146,6 +149,18 @@ class Fixture {
   }
 
   /**
+   * Read the current pin list, optionally appending one id.
+   *
+   * @param {string} [sessionId] - id to append.
+   * @returns {Promise<string[]>} the pinned list.
+   */
+  async pinnedIds(sessionId) {
+    const document = await this.readWorkspace();
+    const existing = document?.global?.pinnedSessionIds;
+    return [...(Array.isArray(existing) ? existing : []), ...(sessionId === undefined ? [] : [sessionId])];
+  }
+
+  /**
    * Read and parse the workspace unit.
    *
    * @returns {Promise<any|undefined>} the parsed document.
@@ -161,16 +176,50 @@ class Fixture {
   /**
    * Write the workspace unit in its on-disk shape.
    *
-   * @param {{ workspaces: Record<string, unknown>, archived: string[] }} state - unit contents.
+   * @param {{ workspaces: Record<string, unknown>, archived: string[], pinned?: string[] }} state - unit contents.
    * @returns {Promise<void>} resolution after the write.
    */
   async writeWorkspace(state) {
     const document = {
       unit: { name: 'workspace', version: 2 },
-      global: { initialized: true, workspaceIds: Object.keys(state.workspaces), archivedSessionIds: state.archived },
+      global: {
+        initialized: true,
+        workspaceIds: Object.keys(state.workspaces),
+        archivedSessionIds: state.archived,
+        pinnedSessionIds: state.pinned ?? [],
+      },
       tables: { workspaces: state.workspaces },
     };
     await writeFile(this.layout.workspaceFile, `${JSON.stringify(document, null, 2)}\n`);
+  }
+
+  /**
+   * Write a host `schedule` unit with the supplied task rows.
+   *
+   * @param {Record<string, unknown>} tasks - task rows keyed by task id.
+   * @returns {Promise<void>} resolution after the write.
+   */
+  async writeSchedule(tasks) {
+    await writeFile(
+      this.layout.scheduleFile,
+      `${JSON.stringify({
+        unit: { name: 'schedule', version: 1 },
+        tables: { tasks },
+      }, null, 2)}\n`,
+    );
+  }
+
+  /**
+   * Read and parse the schedule unit.
+   *
+   * @returns {Promise<any|undefined>} the parsed document.
+   */
+  async readSchedule() {
+    try {
+      return JSON.parse(await readFile(this.layout.scheduleFile, 'utf8'));
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -283,6 +332,102 @@ describe('inspection', () => {
       () => inspectSession({ id: 'session-shape-0001', dshHome: other.home, live: false }),
       StorageShapeError,
     );
+  });
+});
+
+describe('DSH 0.2.x bookkeeping', () => {
+  it('reports the pinned flag and the scheduled tasks bound to a session', async () => {
+    const created = await fixture.addSession({
+      id: 'session-bookkeeping-inspect-0001',
+      title: 'Bookkeeping',
+      archived: true,
+      pinned: true,
+      formatVersion: 4,
+    });
+    await fixture.writeSchedule({
+      'task-active': { sessionId: created.id, record: { id: 'task-active', kind: 'after' }, status: 'active' },
+      'task-inactive': { sessionId: created.id, record: { id: 'task-inactive', kind: 'after' }, status: 'inactive' },
+      'task-other': { sessionId: 'session-other-0001', record: { id: 'task-other', kind: 'after' }, status: 'active' },
+    });
+
+    const report = await inspectSession({ id: created.id, dshHome: fixture.home, live: false });
+    assert.equal(report.formatVersion, 4);
+    assert.equal(report.pinnedFlagPresent, true);
+    assert.equal(report.scheduledTaskCount, 2);
+    const lines = describeInspection(report);
+    assert.ok(lines.some((line) => /pinned list/i.test(line)));
+    assert.ok(lines.some((line) => /2 bound to this session/i.test(line)));
+  });
+
+  it('removes the pinned flag and every schedule task bound to the session', async () => {
+    const created = await fixture.addSession({
+      id: 'session-bookkeeping-delete-0001',
+      archived: true,
+      pinned: true,
+      formatVersion: 4,
+    });
+    await fixture.writeSchedule({
+      'task-active': { sessionId: created.id, record: { id: 'task-active', kind: 'after' }, status: 'active' },
+      'task-inactive': { sessionId: created.id, record: { id: 'task-inactive', kind: 'after' }, status: 'inactive' },
+      'task-other': { sessionId: 'session-other-0001', record: { id: 'task-other', kind: 'after' }, status: 'active' },
+    });
+
+    const report = await deleteSession({ id: created.id, dshHome: fixture.home, live: false });
+    assert.equal(report.pinnedFlagPresent, true);
+    assert.equal(report.scheduledTasksRemoved, 2);
+    assert.ok(report.removedPaths.includes(fixture.layout.scheduleFile));
+    assert.equal(await fixture.exists(created.log), false);
+
+    const workspace = await fixture.readWorkspace();
+    assert.equal(workspace.global.pinnedSessionIds.includes(created.id), false);
+    assert.equal(workspace.global.archivedSessionIds.includes(created.id), false);
+    assert.equal(
+      Object.values(workspace.tables.workspaces).flatMap((row) => row.sessionIds).includes(created.id),
+      false,
+    );
+
+    const schedule = await fixture.readSchedule();
+    assert.equal(schedule.unit.name, 'schedule');
+    assert.equal(schedule.unit.version, 1);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-active'), false);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-inactive'), false);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-other'), true);
+  });
+
+  it('does not touch pins or schedules in a dry run', async () => {
+    const created = await fixture.addSession({ id: 'session-bookkeeping-preview-0001', pinned: true });
+    await fixture.writeSchedule({
+      'task-preview': { sessionId: created.id, record: { id: 'task-preview', kind: 'after' }, status: 'active' },
+    });
+
+    const preview = await deleteSession({ id: created.id, dshHome: fixture.home, live: false, dryRun: true });
+    assert.equal(preview.pinnedFlagPresent, true);
+    assert.equal(preview.scheduledTasksRemoved, 0);
+    const workspace = await fixture.readWorkspace();
+    assert.equal(workspace.global.pinnedSessionIds.includes(created.id), true);
+    const schedule = await fixture.readSchedule();
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-preview'), true);
+
+    // Clean up the fixture session so the shared store does not accumulate rows.
+    await deleteSession({ id: created.id, dshHome: fixture.home, live: false });
+  });
+
+  it('repairs schedule tasks for ids recorded in the deletion ledger', async () => {
+    const created = await fixture.addSession({ id: 'session-schedule-repair-0001' });
+    await fixture.writeSchedule({
+      'task-repair': { sessionId: created.id, record: { id: 'task-repair', kind: 'after' }, status: 'active' },
+      'task-keep': { sessionId: 'session-keep-0001', record: { id: 'task-keep', kind: 'after' }, status: 'active' },
+    });
+    await mkdir(path.dirname(fixture.layout.ledgerFile), { recursive: true });
+    await writeFile(fixture.layout.ledgerFile, `${JSON.stringify({ sessionId: created.id })}\n`);
+
+    const outcome = await repairSchedule(fixture.layout);
+    assert.equal(outcome.removed, 1);
+    const schedule = await fixture.readSchedule();
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-repair'), false);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-keep'), true);
+
+    await deleteSession({ id: created.id, dshHome: fixture.home, live: false });
   });
 });
 
