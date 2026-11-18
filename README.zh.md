@@ -8,8 +8,11 @@ dsh 自带的「归档」只是把会话从侧边栏藏起来，磁盘上的东�
 
 ## 兼容性
 
-当前版本面向 DSH `0.2.1-rc.3` 及后续 `0.2.x`，会清理这些版本新增的
-`pinnedSessionIds` 和 `schedule` 存储单元。它不面向 DSH `0.1.x`。
+当前版本面向 DSH `0.2.1-rc.3` 至 `0.2.2` 及后续 `0.2.x`，会清理这些版本新增的
+`pinnedSessionIds` 和 `schedule` 存储单元。DSH `0.2.2` 把会话从工作区的移除操作移到了
+每个 Workspace 实体上，并把 schedule 存储单元升到版本 2、把任务目标放进
+`target.sessionId`；这个版本同时兼容新形状和 `0.2.1` 的旧形状；确认弹窗会跟随界面
+语言显示中文或英文。它不面向 DSH `0.1.x`。
 
 ## 环境要求
 
@@ -79,9 +82,9 @@ npx dsh-session-admin delete <session-id> --yes
 | 置顶标记 | `$DSH_HOME/storages/workspace.json` → `global.pinnedSessionIds` |
 | 绑定到会话的定时任务 | `$DSH_HOME/storages/schedule.json` → `tables.tasks` |
 
-宿主插件通过运行中的 `workspaceRegistry` 和 `schedule` 服务清理这些状态，避免运行中的
-dsh 在下一次无关写入时把它们恢复；离线 CLI 直接改同样的存储单元，中断的删除由启动时的
-台账修复收敛。
+宿主插件通过运行中的 `workspaceRegistry`（及其 Workspace 实体）和 `schedule` 服务清理
+这些状态，避免运行中的 dsh 在下一次无关写入时把它们恢复；离线 CLI 直接改同样的存储单元，
+中断的删除由启动时的台账修复收敛。
 
 有两样东西是故意不动的：
 
@@ -139,7 +142,7 @@ dsh-session-admin repair             # 把历史删除重新应用到 workspace.
 npm test
 ```
 
-103 个测试各自在临时目录里搭一套存储。覆盖删除本身，以及各种「不能误报成功」和「不能删错」
+109 个测试各自在临时目录里搭一套存储。覆盖删除本身，以及各种「不能误报成功」和「不能删错」
 的路径：v0 日志、被手工改名的项目目录、只剩元数据、日志身份不符；活跃会话、不存在的 id、
 恶意请求体、软链接目录与软链接根、带原型污染键的存储文档；还有工作区与定时任务的修复
 循环、宿主插件策略、通信契约、浏览器端组件和命令注册。`real Cordis runtime` 一组会加载

@@ -326,42 +326,92 @@ describe('service policy', () => {
       },
     }, null, 2)}\n`);
     await writeFile(scheduleFile, `${JSON.stringify({
-      unit: { name: 'schedule', version: 1 },
+      unit: { name: 'schedule', version: 2 },
       tables: {
         tasks: {
-          'task-bound': { sessionId: id, record: { id: 'task-bound', kind: 'after' }, status: 'active' },
-          'task-other': { sessionId: 'session-other-0001', record: { id: 'task-other', kind: 'after' }, status: 'active' },
+          'task-bound': {
+            id: 'task-bound',
+            target: { kind: 'session', sessionId: id },
+            involvedSessionIds: [id],
+            status: 'active',
+          },
+          'task-other': {
+            id: 'task-other',
+            target: { kind: 'session', sessionId: 'session-other-0001' },
+            involvedSessionIds: ['session-other-0001'],
+            status: 'active',
+          },
         },
       },
     }, null, 2)}\n`);
 
     const calls = [];
     const deletedTasks = [];
-    const registry = {
+    const workspace = {
       detachSession: async (sessionId) => calls.push(['detach', sessionId]),
+    };
+    const registry = {
+      list: () => [workspace],
       unpinSession: async (sessionId) => calls.push(['unpin', sessionId]),
       unarchiveSession: async (sessionId) => calls.push(['unarchive', sessionId]),
     };
     const schedule = {
       catalog: async () => [
-        { id: 'task-bound', sessionId: id },
-        { id: 'task-other', sessionId: 'session-other-0001' },
+        {
+          id: 'task-bound',
+          target: { kind: 'session', sessionId: id },
+          involvedSessionIds: [id],
+          status: 'active',
+        },
+        {
+          id: 'task-other',
+          target: { kind: 'session', sessionId: 'session-other-0001' },
+          involvedSessionIds: ['session-other-0001'],
+          status: 'active',
+        },
       ],
-      delete: async ({ sessionId, id: taskId }) => {
-        deletedTasks.push([sessionId, taskId]);
-        return { id: taskId, deleted: true };
+      edit: async (request) => {
+        deletedTasks.push(request);
+        return { id: request.id, deleted: true };
       },
     };
     const admin = makeAdmin({ home, extra: { workspaceRegistry: registry, schedule } });
     const report = await admin.delete(id);
 
     assert.deepEqual(calls, [['detach', id], ['unpin', id], ['unarchive', id]]);
-    assert.deepEqual(deletedTasks, [[id, 'task-bound']]);
+    assert.deepEqual(deletedTasks, [{ id: 'task-bound', action: 'delete' }]);
     assert.equal(report.pinnedFlagPresent, true);
     assert.equal(report.archivedFlagPresent, true);
     assert.equal(report.scheduledTasksRemoved, 1);
     assert.equal(await readFile(workspaceFile, 'utf8').then((text) => text.includes(id)), true);
     assert.equal(await readFile(scheduleFile, 'utf8').then((text) => text.includes('task-bound')), true);
+  });
+
+  it('still understands the pre-0.2.2 registry and schedule call shapes', async () => {
+    // DSH 0.2.1 exposed `detachSession` on the registry and a `delete` call for
+    // task rows that carried a top-level `sessionId`. A plugin build must not
+    // break a profile that is still on that generation.
+    const { home, id } = await makeStore();
+    const calls = [];
+    const deletedTasks = [];
+    const registry = {
+      detachSession: async (sessionId) => calls.push(['detach', sessionId]),
+      unpinSession: async () => {},
+      unarchiveSession: async () => {},
+    };
+    const schedule = {
+      catalog: async () => [{ id: 'task-bound', sessionId: id }],
+      delete: async (request) => {
+        deletedTasks.push(request);
+        return { id: request.id, deleted: true };
+      },
+    };
+    const admin = makeAdmin({ home, extra: { workspaceRegistry: registry, schedule } });
+    const report = await admin.delete(id);
+
+    assert.deepEqual(calls, [['detach', id]]);
+    assert.deepEqual(deletedTasks, [{ sessionId: id, id: 'task-bound' }]);
+    assert.equal(report.scheduledTasksRemoved, 1);
   });
 
   it('settles a queued deletion only after the session is released', async () => {
@@ -697,7 +747,7 @@ describe('command surface', () => {
     assert.ok(typeof definition.description === 'string' && definition.description.length > 0);
 
     const result = await definition.handler({
-      agent: { session: { id: 'session-agent-0001' } },
+      agent: { id: 'session-agent-0001' },
       rawInput: 'session-absent-0001',
       attachments: [],
       signal: new AbortController().signal,
@@ -711,7 +761,7 @@ describe('command surface', () => {
     const { home, id } = await makeStore();
     const { registrations } = commandHarness({ home });
     const result = await registrations[0].handler({
-      agent: { session: { id } },
+      agent: { id },
       rawInput: '   ',
       attachments: [],
       signal: new AbortController().signal,
@@ -721,11 +771,25 @@ describe('command surface', () => {
     assert.ok(result.text.includes(id));
   });
 
+  it('still reads the receiving session from the pre-0.2.2 agent shape', async () => {
+    const { home, id } = await makeStore();
+    const { registrations } = commandHarness({ home });
+    const result = await registrations[0].handler({
+      agent: { session: { id } },
+      rawInput: '',
+      attachments: [],
+      signal: new AbortController().signal,
+      commandId: 'cmd-legacy-agent',
+    });
+    assert.equal(result.kind, 'success');
+    assert.ok(result.text.includes(id));
+  });
+
   it('queues instead of failing when the addressed session is live', async () => {
     const { home, id } = await makeStore();
     const { registrations } = commandHarness({ home, live: [id] });
     const result = await registrations[0].handler({
-      agent: { session: { id: 'session-other-0001' } },
+      agent: { id: 'session-other-0001' },
       rawInput: id,
       attachments: [],
       signal: new AbortController().signal,

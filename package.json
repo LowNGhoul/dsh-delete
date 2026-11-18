@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-admin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Permanently delete DeepSeek Harness (dsh) conversations everywhere they are stored — append-only session logs, projection checkpoints, workspace membership, archive flags, pins, and scheduled tasks — with a GUI delete action and a /delete command.",
   "type": "module",
   "main": "lib/index.js",

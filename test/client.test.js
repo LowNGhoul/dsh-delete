@@ -185,8 +185,13 @@ before(async () => {
   assert.ok(loaded !== undefined, 'the bundle did not call window.__ModuleLoader__.load');
   assert.equal(loaded.id, 'dsh-session-admin');
   plugin = loaded.factory((specifier) => {
-    assert.equal(specifier, 'react');
-    return ReactStub;
+    if (specifier === 'react') return ReactStub;
+    if (specifier === 'react-dom') {
+      return {
+        createPortal: (element, container) => ({ type: 'portal', props: { element, container }, children: [] }),
+      };
+    }
+    assert.fail(`unexpected runtime import: ${specifier}`);
   });
 });
 
@@ -196,9 +201,9 @@ after(() => {
 });
 
 describe('client bundle', () => {
-  it('exports an ordinary Cordis plugin declaring the slot registry', () => {
+  it('exports an ordinary Cordis plugin declaring the slot registry and locale', () => {
     assert.equal(plugin.name, 'session-admin');
-    assert.deepEqual(plugin.inject, ['slots']);
+    assert.deepEqual(plugin.inject, ['slots', 'locale']);
     assert.equal(typeof plugin.apply, 'function');
   });
 
@@ -235,6 +240,142 @@ describe('client bundle', () => {
     const element = plugin.DeleteSessionAction({ sessionId: 'session-x-0001' });
     assert.ok(element !== null);
     assert.equal(element.type, ReactStub.Fragment);
+  });
+
+  it('renders the action and dialog copy in Chinese when the locale selects it', async () => {
+    /** Translate through the bundle's own Chinese dictionary. @param {string} key - dictionary key. @param {Record<string, unknown>} [params] - placeholders. @returns {string} Chinese text. */
+    const t = (key, params = {}) => (plugin.DICTIONARIES.zh[key] ?? key)
+      .replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    ReactStub.__clear();
+    ReactStub.__reset();
+    const action = plugin.DeleteSessionAction({ sessionId: 'session-x-0001', t });
+    assert.equal(action.children[0].props.title, '永久删除此会话');
+    assert.equal(action.children[0].props['aria-label'], '永久删除此会话');
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: {
+            sessionId: 'session-x-0001',
+            title: '中文会话',
+            cwd: '/tmp/中文项目',
+            live: false,
+            bytesRemoved: 2048,
+            logCount: 1,
+            projectionCount: 1,
+            workspaceCount: 1,
+            workspaces: [{ title: '中文工作区', path: '/tmp/中文项目' }],
+            clearedArchive: false,
+            clearedPin: false,
+            scheduledTaskCount: 0,
+            attachmentCount: 0,
+            searchIndex: null,
+            lines: [],
+          },
+        },
+      }),
+    });
+    ReactStub.__clear();
+    ReactStub.__reset();
+    plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {}, t });
+    for (const effect of ReactStub.__effects()) effect();
+    await new Promise((resolve) => setImmediate(resolve));
+    ReactStub.__reset();
+    const element = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {}, t });
+    const texts = collectText(element);
+    assert.ok(texts.includes('永久删除此会话'));
+    assert.ok(texts.includes('正在读取会话…') || texts.some((text) => /会话：session-x-0001/.test(text)));
+    assert.ok(texts.some((text) => text.includes('会话：session-x-0001')));
+    assert.ok(texts.some((text) => text.includes('标题：中文会话')));
+    assert.ok(texts.some((text) => text.includes('占用大小：2.0 KiB')));
+    assert.ok(texts.some((text) => text.includes('工作区记录：中文工作区 (/tmp/中文项目)')));
+    assert.ok(texts.includes('此操作无法撤销。'));
+    assert.ok(texts.includes('取消'));
+    assert.ok(texts.includes('永久删除'));
+    delete globalThis.fetch;
+  });
+
+  it('renders the settled-deletion lines in Chinese from the structured report', async () => {
+    /** Translate through the bundle's own Chinese dictionary. @param {string} key - dictionary key. @param {Record<string, unknown>} [params] - placeholders. @returns {string} Chinese text. */
+    const t = (key, params = {}) => (plugin.DICTIONARIES.zh[key] ?? key)
+      .replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+    let phase = 'inspect';
+    globalThis.fetch = async () => {
+      if (phase === 'inspect') {
+        return {
+          ok: true,
+          json: async () => ({
+            result: {
+              ok: true,
+              value: {
+                sessionId: 'session-x-0001',
+                title: '中文会话',
+                cwd: '/tmp/中文项目',
+                live: false,
+                bytesRemoved: 2048,
+                logCount: 1,
+                projectionCount: 1,
+                workspaceCount: 1,
+                workspaces: [{ title: '中文工作区', path: '/tmp/中文项目' }],
+                clearedArchive: false,
+                clearedPin: false,
+                scheduledTaskCount: 0,
+                attachmentCount: 0,
+                searchIndex: null,
+                lines: [],
+              },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          result: {
+            ok: true,
+            value: {
+              queued: false,
+              forced: true,
+              sessionId: 'session-x-0001',
+              report: {
+                sessionId: 'session-x-0001',
+                title: '中文会话',
+                bytesRemoved: 2048,
+                removedCount: 4,
+                backedUpCount: 0,
+                workspaceCount: 1,
+                clearedArchive: false,
+                clearedPin: false,
+                scheduledTasksRemoved: 0,
+                attachmentCount: 0,
+              },
+              lines: ['Permanently deleted from the host'],
+            },
+          },
+        }),
+      };
+    };
+    ReactStub.__clear();
+    ReactStub.__reset();
+    plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {}, t });
+    for (const effect of ReactStub.__effects()) effect();
+    await new Promise((resolve) => setImmediate(resolve));
+    ReactStub.__reset();
+    const confirm = findButton(plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {}, t }), /永久删除/);
+    assert.ok(confirm !== null);
+    phase = 'delete';
+    await confirm.props.onClick();
+    await new Promise((resolve) => setImmediate(resolve));
+    ReactStub.__reset();
+    const settled = plugin.DeleteDialog({ sessionId: 'session-x-0001', onClose: () => {}, t });
+    const texts = collectText(settled);
+    assert.ok(texts.some((text) => text.includes('已永久删除“中文会话” — session-x-0001。')));
+    assert.ok(texts.some((text) => text.includes('已释放 2.0 KiB，涉及 4 个路径。')));
+    assert.ok(texts.some((text) => text.includes('已从 1 个工作区记录中移除。')));
+    assert.ok(texts.includes('关闭'));
+    delete globalThis.fetch;
   });
 
   it('offers the irreversible action with its consequence once the inspection resolved', async () => {

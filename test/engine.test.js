@@ -197,13 +197,14 @@ class Fixture {
    * Write a host `schedule` unit with the supplied task rows.
    *
    * @param {Record<string, unknown>} tasks - task rows keyed by task id.
+   * @param {number} [version] - schedule-unit version to declare.
    * @returns {Promise<void>} resolution after the write.
    */
-  async writeSchedule(tasks) {
+  async writeSchedule(tasks, version = 1) {
     await writeFile(
       this.layout.scheduleFile,
       `${JSON.stringify({
-        unit: { name: 'schedule', version: 1 },
+        unit: { name: 'schedule', version },
         tables: { tasks },
       }, null, 2)}\n`,
     );
@@ -391,6 +392,54 @@ describe('DSH 0.2.x bookkeeping', () => {
     assert.equal(schedule.unit.version, 1);
     assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-active'), false);
     assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-inactive'), false);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-other'), true);
+  });
+
+  it('reads version-2 bookkeeping rows whose destination is target.sessionId', async () => {
+    const created = await fixture.addSession({
+      id: 'session-bookkeeping-v2-0001',
+      formatVersion: 4,
+    });
+    await fixture.writeSchedule({
+      'task-bound': {
+        id: 'task-bound',
+        target: { kind: 'session', sessionId: created.id },
+        involvedSessionIds: [created.id],
+        status: 'active',
+      },
+      'task-reserved': {
+        id: 'task-reserved',
+        target: { kind: 'new_once', sessionId: created.id, create: {} },
+        involvedSessionIds: [created.id],
+        status: 'paused',
+      },
+      'task-new': {
+        id: 'task-new',
+        target: { kind: 'new', create: {} },
+        involvedSessionIds: [created.id],
+        status: 'active',
+      },
+      'task-other': {
+        id: 'task-other',
+        target: { kind: 'session', sessionId: 'session-other-0001' },
+        involvedSessionIds: ['session-other-0001'],
+        status: 'active',
+      },
+    }, 2);
+
+    const inspection = await inspectSession({ id: created.id, dshHome: fixture.home, live: false });
+    assert.equal(inspection.scheduledTaskCount, 2);
+
+    const report = await deleteSession({ id: created.id, dshHome: fixture.home, live: false });
+    assert.equal(report.scheduledTasksRemoved, 2);
+
+    const schedule = await fixture.readSchedule();
+    assert.equal(schedule.unit.version, 2);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-bound'), false);
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-reserved'), false);
+    // A `new` target belongs to no stored conversation, and an entry aimed at
+    // another conversation must survive this deletion.
+    assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-new'), true);
     assert.equal(Object.hasOwn(schedule.tables.tasks, 'task-other'), true);
   });
 

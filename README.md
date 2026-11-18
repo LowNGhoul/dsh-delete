@@ -9,10 +9,14 @@ and pinned entries, and any scheduled task bound to it. There is no undo.
 
 ## Compatibility
 
-The current version targets DSH `0.2.1-rc.3` and later `0.2.x` releases. It
-removes the store artifacts those versions write, including the workspace
-`pinnedSessionIds` list and the `schedule` storage unit. It is not intended for
-DSH `0.1.x`; use the previous release there.
+The current version targets DSH `0.2.1-rc.3` through `0.2.2` and later `0.2.x`
+releases. It removes the store artifacts those versions write, including the
+workspace `pinnedSessionIds` list and the `schedule` storage unit. DSH `0.2.2`
+moved workspace session detachment onto each Workspace entity and raised the
+schedule unit to version 2 with `target.sessionId` destinations; this release
+handles both that shape and the earlier `0.2.1` one. The confirmation dialog
+follows the page language (Chinese or English). It is not intended for DSH
+`0.1.x`; use the previous release there.
 
 ## Requirements
 
@@ -102,9 +106,10 @@ the sidebar, so a real deletion covers all of these:
 | Scheduled tasks bound to the session | `$DSH_HOME/storages/schedule.json` → `tables.tasks` |
 
 The host plugin removes workspace state through the live `workspaceRegistry`
-and scheduled tasks through the live `schedule` service, so a running dsh cannot
-restore them on its next unrelated write. The offline CLI edits the same units
-directly; an interrupted CLI deletion is converged by the startup ledger repair.
+and its Workspace entities, and scheduled tasks through the live `schedule`
+service, so a running dsh cannot restore them on its next unrelated write. The
+offline CLI edits the same units directly; an interrupted CLI deletion is
+converged by the startup ledger repair.
 
 Two things are deliberately kept:
 
@@ -177,7 +182,7 @@ child session.
 npm test
 ```
 
-103 tests build their own store under a temporary directory. They cover the
+109 tests build their own store under a temporary directory. They cover the
 deletion itself, the false-positive guards (generation-zero logs, hand-renamed
 project directories, orphan metadata, mismatched identities), the refusals (live
 sessions, unknown ids, hostile payloads, symlinked directories and roots,

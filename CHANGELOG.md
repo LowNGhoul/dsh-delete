@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.1
+
+Compatibility with DSH `0.2.2` while keeping `0.2.1-rc.3` working.
+
+- **A scheduled reminder no longer blocks inspection.** DSH 0.2.2 bumped the
+  `schedule` storage unit to version 2 and moved a task's destination to
+  `target.sessionId` (including `new_once` reservations). The engine now accepts
+  versions 1 and 2 and reads both destination spellings, so the confirmation
+  dialog can list and remove a session on a profile that has ever created an
+  automation task. A later unit version still fails closed.
+- **Deleting a conversation no longer leaves a bare-id ghost row.** DSH 0.2.2
+  moved `detachSession` from the workspace registry to each Workspace entity.
+  The old registry-level call became a silent no-op, so the deleted id stayed in
+  the durable workspace record and the sidebar rendered it as a raw session id.
+  The host now detaches the id from every workspace entity, and keeps the old
+  registry-level call as a fallback for `0.2.1`.
+- **`/delete` without an argument works again.** DSH 0.2.2 exposes the invoking
+  session as `agent.id`; the command surface only read the earlier
+  `agent.session.id`, so it reported that the receiving session had no id. Both
+  shapes are now accepted.
+- **The confirmation dialog follows the page language.** The header action and
+  every dialog label now go through the client locale service, with `zh` and
+  `en` dictionaries. The host report lines were language-neutral data, so the
+  browser composes the visible facts (session, title, project, size, artifacts,
+  workspace rows, attachments, result totals) from the structured summaries
+  instead of embedding English sentences; a Chinese UI gets a Chinese dialog,
+  including the settled-deletion result. The browser summary also carries the
+  workspace rows and search-index path the localized lines need.
+- **The confirmation dialog actually appears in the current header.** DSH
+  `0.2.2` clips the conversation header's action row (`overflow: clip` plus a
+  mask), and the dialog was rendered as a child of that row. The overlay was
+  clipped to a thin gray strip at the top of the window, so a click looked like
+  it did nothing. The dialog is now `createPortal`-ed to `document.body`, beside
+  the app root, and uses an opaque `--dsw-alias-bg-layer-2` surface instead of
+  the translucent menu fill that let the transcript show through the panel.
+- **The live schedule cleanup uses the current management API.** Deleting a
+  session now removes its tasks with `schedule.edit({ action: 'delete' })` and
+  reads the destination from `target.sessionId` (falling back to the legacy
+  top-level `sessionId`), with the old `schedule.delete({ sessionId, id })` call
+  kept as a fallback.
+
 ## 0.1.0
 
 First release.

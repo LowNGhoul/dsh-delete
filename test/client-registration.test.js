@@ -170,11 +170,14 @@ let React;
 let slots;
 /** @type {unknown[]} */
 let styleTags;
+/** Every `createPortal` call the bundle made. @type {{ element: unknown, container: unknown }[]} */
+let portalCalls;
 
 before(async () => {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
   let loaded;
   styleTags = [];
+  portalCalls = [];
   globalThis.window = { __ModuleLoader__: { load: (registration) => { loaded = registration; } } };
   globalThis.document = {
     // The bundle guards its own stylesheet with a `style[data-plugin=...]` lookup,
@@ -197,6 +200,7 @@ before(async () => {
     head: { appendChild: (node) => styleTags.push(node) },
     addEventListener: () => {},
     removeEventListener: () => {},
+    body: {},
   };
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: { ok: true, value: {} } }) });
 
@@ -205,7 +209,15 @@ before(async () => {
   assert.ok(loaded !== undefined, 'the bundle must register itself with __ModuleLoader__');
   assert.equal(loaded.id, 'dsh-session-admin');
   plugin = loaded.factory((specifier) => {
-    assert.equal(specifier, 'react', 'the bundle may require only the baseline React module');
+    if (specifier === 'react-dom') {
+      return {
+        createPortal: (element, container) => {
+          portalCalls.push({ element, container });
+          return { type: 'portal', props: { element, container }, children: [] };
+        },
+      };
+    }
+    assert.equal(specifier, 'react', 'the bundle may require only the baseline React modules');
     // Exactly one React instance for the whole file: the bundle captures the
     // module it is handed, so a second stand-in would leave the test resetting
     // state the component never reads.
@@ -222,9 +234,9 @@ after(() => {
 });
 
 describe('client plugin contract', () => {
-  it('exports a Cordis plugin whose only hard dependency is the slot registry', () => {
+  it('exports a Cordis plugin declaring the slot registry and locale service', () => {
     assert.equal(plugin.name, 'session-admin');
-    assert.deepEqual(plugin.inject, ['slots']);
+    assert.deepEqual(plugin.inject, ['slots', 'locale']);
     assert.equal(typeof plugin.apply, 'function');
   });
 
@@ -327,12 +339,24 @@ describe('rendered action', () => {
     slots.declare(HEADER_SLOT);
     plugin.apply({ effect: (factory) => factory(), slots });
     const component = slots.registrations[0].component;
+    const realUseState = React.useState;
     React.useState = (initial) => [typeof initial === 'function' ? initial() : initial, (value) => { setOpen = value; }];
     const rendered = React.__render(() => component({ sessionId: 'session-x-0001' }));
     rendered.children[0].props.onClick({ stopPropagation: () => { stopped = true; } });
+    React.useState = realUseState;
     assert.equal(stopped, true, 'the press must not also open the conversation');
     assert.equal(setOpen, true, 'the press must open the confirmation dialog');
     void element;
+  });
+
+  it('portals the open dialog beside the app root, out of the clipped header', () => {
+    renderAction({ sessionId: 'session-x-0001' });
+    React.__setCell(0, true);
+    const opened = React.__render(() => slots.registrations[0].component({ sessionId: 'session-x-0001' }));
+    const portal = opened.children[1];
+    assert.equal(portal.type, 'portal', 'the dialog must not render inside the header action row');
+    assert.equal(portalCalls.length, 1);
+    assert.equal(portalCalls[0].container, globalThis.document.body);
   });
 });
 
